@@ -541,6 +541,18 @@ async function startMessageLoop(): Promise<void> {
           const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
+          // Prevent active containers from intercepting messages addressed to the other bot
+          if (OTHER_BOT_TRIGGERS.length > 0) {
+            const newestHumanMsg = [...groupMessages].reverse().find((m) => !m.is_from_me);
+            if (newestHumanMsg) {
+              const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+              const myPattern = getTriggerPattern(group.trigger);
+              const addressesOther = otherPatterns.some((p) => p.test(newestHumanMsg.content.trim()));
+              const addressesMe = myPattern.test(newestHumanMsg.content.trim());
+              if (addressesOther && !addressesMe) continue;
+            }
+          }
+
           // For non-main groups, only act on trigger messages.
           // Non-trigger messages accumulate in DB and get pulled as
           // context when a trigger eventually arrives.
