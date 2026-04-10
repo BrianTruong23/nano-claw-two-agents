@@ -29,4 +29,6 @@ export declare const DEFAULT_TRIGGER: string;
 export declare function getTriggerPattern(trigger?: string): RegExp;
 export declare const TRIGGER_PATTERN: RegExp;
 export declare const TIMEZONE: string;
+export declare const OTHER_BOT_TRIGGERS: string[];
+export declare const WAIT_FOR_BOT_RESPONSE: boolean;
 //# sourceMappingURL=config.d.ts.map

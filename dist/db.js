@@ -269,7 +269,7 @@ export function getMessagesSince(chatJid, sinceTimestamp, botPrefix, limit = 200
              reply_to_message_id, reply_to_message_content, reply_to_sender_name
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
-        AND is_bot_message = 0 AND content NOT LIKE ?
+        AND NOT (is_bot_message = 1 AND is_from_me = 1) AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?
@@ -278,6 +278,12 @@ export function getMessagesSince(chatJid, sinceTimestamp, botPrefix, limit = 200
     return db
         .prepare(sql)
         .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit);
+}
+export function hasCrossBotResponse(chatJid, sinceTimestamp) {
+    const row = db
+        .prepare(`SELECT 1 FROM messages WHERE chat_jid = ? AND id LIKE 'xbot_%' AND timestamp > ? LIMIT 1`)
+        .get(chatJid, sinceTimestamp);
+    return !!row;
 }
 export function getLastBotMessageTimestamp(chatJid, botPrefix) {
     const row = db

@@ -57,6 +57,7 @@ export declare function getNewMessages(jids: string[], lastTimestamp: string, bo
     newTimestamp: string;
 };
 export declare function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string, limit?: number): NewMessage[];
+export declare function hasCrossBotResponse(chatJid: string, sinceTimestamp: string): boolean;
 export declare function getLastBotMessageTimestamp(chatJid: string, botPrefix: string): string | undefined;
 export declare function createTask(task: Omit<ScheduledTask, 'last_run' | 'last_result'>): void;
 export declare function getTaskById(id: string): ScheduledTask | undefined;

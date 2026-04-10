@@ -17,6 +17,8 @@ const envConfig = readEnvFile([
     'CONTROL_PLANE_INCLUDE_BACKLOG',
     'CONTROL_PLANE_SUCCESS_STATUS',
     'CONTROL_PLANE_FAILURE_STATUS',
+    'OTHER_BOT_TRIGGER',
+    'WAIT_FOR_BOT_RESPONSE',
 ]);
 export const ASSISTANT_NAME = process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
 export const ASSISTANT_HAS_OWN_NUMBER = (process.env.ASSISTANT_HAS_OWN_NUMBER ||
@@ -90,4 +92,11 @@ function resolveConfigTimezone() {
     return 'UTC';
 }
 export const TIMEZONE = resolveConfigTimezone();
+export const OTHER_BOT_TRIGGERS = (process.env['OTHER_BOT_TRIGGER'] ||
+    envConfig['OTHER_BOT_TRIGGER'] ||
+    '')
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+export const WAIT_FOR_BOT_RESPONSE = (process.env['WAIT_FOR_BOT_RESPONSE'] || envConfig['WAIT_FOR_BOT_RESPONSE']) === 'true';
 //# sourceMappingURL=config.js.map
