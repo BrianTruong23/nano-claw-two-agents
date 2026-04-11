@@ -37,6 +37,24 @@ pkill -f "nano-claw-agents/.*/dist/index.js" 2>/dev/null || true
 pkill -f "bot-bridge.sh" 2>/dev/null || true
 sleep 1
 
+# Rebuild when dist is missing, incomplete, or older than any src/*.ts (avoids ERR_MODULE_NOT_FOUND after pulls).
+ensure_agent_build() {
+  local root="$1"
+  local name
+  name="$(basename "$root")"
+  if [[ ! -f "$root/dist/index.js" ]] || [[ ! -f "$root/dist/claude-runner.js" ]]; then
+    echo "Building $name (dist missing or incomplete)..."
+    (cd "$root" && npm run build)
+    return
+  fi
+  if find "$root/src" -name '*.ts' -newer "$root/dist/index.js" 2>/dev/null | grep -q .; then
+    echo "Building $name (TypeScript newer than dist)..."
+    (cd "$root" && npm run build)
+  fi
+}
+ensure_agent_build "$SCRIPT_DIR/andy"
+ensure_agent_build "$SCRIPT_DIR/bob"
+
 echo "Starting Andy..."
 nohup bash -c "cd '$SCRIPT_DIR/andy' && exec node dist/index.js" >> "$LOG_DIR/andy.log" 2>&1 &
 ANDY_PID=$!
