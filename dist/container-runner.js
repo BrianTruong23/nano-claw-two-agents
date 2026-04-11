@@ -25,7 +25,9 @@ const PASSTHROUGH_ENV_VARS = [
 function buildVolumeMounts(group, isMain) {
     const mounts = [];
     const projectRoot = process.cwd();
+    const sharedCommonDir = path.resolve(projectRoot, '..', '..', 'common');
     const groupDir = resolveGroupFolderPath(group.folder);
+    fs.mkdirSync(sharedCommonDir, { recursive: true });
     if (isMain) {
         // Main gets the project root read-only. Writable paths the agent needs
         // (store, group folder, IPC, .claude/) are mounted separately below.
@@ -89,6 +91,12 @@ function buildVolumeMounts(group, isMain) {
             });
         }
     }
+    // Shared writable workspace visible to both Andy and Bob instances.
+    mounts.push({
+        hostPath: sharedCommonDir,
+        containerPath: '/workspace/common',
+        readonly: false,
+    });
     // Per-group Claude sessions directory (isolated from other groups)
     // Each group gets their own .claude/ to prevent cross-group session access
     const groupSessionsDir = path.join(DATA_DIR, 'sessions', group.folder, '.claude');

@@ -13,6 +13,7 @@ Use this skill when the user asks to check repository state, inspect remotes, co
 ```bash
 github status
 github whoami
+git clone <repository_url>
 git status --short --branch
 git remote -v
 git diff

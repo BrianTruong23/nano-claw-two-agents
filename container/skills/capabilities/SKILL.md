@@ -81,6 +81,7 @@ Present the report as a clean, readable message. Example:
 • /agent-browser — Browse the web, fill forms, extract data
 • /github — Inspect Git/GitHub state and push committed work
 • /coding-agent — Route code edits, tests, commits, and pushes to Codex
+• /workspace-files — Create/read shared text files in /workspace/common
 • /capabilities — This report
 (list all found skills)
 
@@ -93,6 +94,7 @@ Present the report as a clean, readable message. Example:
 *Container Tools:*
 • agent-browser: ✓
 • Git/GitHub: ✓ / unavailable
+• Workspace files: ✓
 
 *System:*
 • Group memory: yes/no

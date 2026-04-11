@@ -58,6 +58,7 @@ Confirm which tool families are available to you:
 which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not installed"
 git --version 2>/dev/null || echo "git: not installed"
 github status
+workspace-list
 node --version 2>/dev/null
 claude --version 2>/dev/null
 ```
@@ -95,6 +96,7 @@ Present as a clean, readable message:
 *Container:*
 • agent-browser: ✓ / not installed
 • Git/GitHub: ✓ / unavailable
+• Shared workspace: /workspace/common
 • Node: vXX.X.X
 • Claude Code: vX.X.X
 

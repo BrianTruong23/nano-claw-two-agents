@@ -19,6 +19,8 @@ const MAX_TOOL_COMMANDS_PER_TURN = 4;
 const GROUP_DIR = '/workspace/group';
 const GLOBAL_DIR = '/workspace/global';
 const PROJECT_DIR = '/workspace/project';
+const COMMON_DIR = '/workspace/common';
+const SKILLS_DIR = '/home/node/.claude/skills';
 const SESSIONS_DIR = path.join(GROUP_DIR, '.nanoclaw-sessions');
 const CONVERSATIONS_DIR = path.join(GROUP_DIR, 'conversations');
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -98,12 +100,37 @@ function appendMemoryFile(parts, label, baseDir, filename) {
     parts.push(`${label} (${filename}):`);
     parts.push(content);
 }
+function readInstalledSkills() {
+    try {
+        if (!fs.existsSync(SKILLS_DIR))
+            return null;
+        const skillNames = fs
+            .readdirSync(SKILLS_DIR)
+            .filter((name) => fs.statSync(path.join(SKILLS_DIR, name)).isDirectory())
+            .sort();
+        const sections = [];
+        for (const name of skillNames) {
+            const skillPath = path.join(SKILLS_DIR, name, 'SKILL.md');
+            const content = readOptionalFile(skillPath);
+            if (!content)
+                continue;
+            sections.push(`## /${name}\n${content.slice(0, 2500)}`);
+        }
+        return sections.length > 0 ? sections.join('\n\n') : null;
+    }
+    catch (err) {
+        log(`Failed to read installed skills: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+    }
+}
 function buildSystemPrompt(containerInput) {
     const parts = [
         `You are ${containerInput.assistantName || 'Andy'}, the NanoClaw assistant replying inside a chat.`,
         'Be concise, direct, and helpful.',
         'If the user asks for code or debugging help, focus on actionable technical guidance.',
         'Do not claim to have completed actions you did not actually complete.',
+        'Executable commands available in this runtime: agent-browser, github, safe git commands, workspace-list, workspace-read, workspace-write.',
+        'For files that should be visible to both Andy and Bob, use /workspace/common. For chat-specific notes, use /workspace/group.',
     ];
     const groupMemory = readOptionalFile(path.join(GROUP_DIR, 'CLAUDE.md'));
     const globalMemory = readOptionalFile(path.join(GLOBAL_DIR, 'CLAUDE.md'));
@@ -121,6 +148,11 @@ function buildSystemPrompt(containerInput) {
     appendMemoryFile(parts, 'Group personality memory', GROUP_DIR, 'soul.md');
     appendMemoryFile(parts, 'Group user context', GROUP_DIR, 'user.md');
     appendMemoryFile(parts, 'Group heartbeat/status context', GROUP_DIR, 'heartbeat.md');
+    const installedSkills = readInstalledSkills();
+    if (installedSkills) {
+        parts.push('Installed skills and usage instructions:');
+        parts.push(installedSkills);
+    }
     return parts.join('\n\n');
 }
 function toMarkdownTitle(messages) {
@@ -314,7 +346,14 @@ function shellSplit(command) {
     let escaping = false;
     for (const char of command.trim()) {
         if (escaping) {
-            current += char;
+            if (char === 'n')
+                current += '\n';
+            else if (char === 't')
+                current += '\t';
+            else if (char === 'r')
+                current += '\r';
+            else
+                current += char;
             escaping = false;
             continue;
         }
@@ -374,21 +413,39 @@ function isAllowedGitCommand(args) {
     ]).has(subcommand);
 }
 function isToolCommand(command) {
-    return /^(agent-browser|git|github)\b/.test(command.trim());
+    return /^(agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write)\b/.test(command.trim());
 }
 function extractToolCommands(reply) {
     const commands = [];
     const seen = new Set();
+    const isRunnable = (command) => {
+        const [executable, ...args] = shellSplit(command);
+        if (!executable)
+            return false;
+        if (executable === 'workspace-write') {
+            return args.length >= 2 && args.slice(1).join(' ').trim() !== '...';
+        }
+        if (executable === 'workspace-read' || executable === 'touch') {
+            return args.length >= 1 && args[0] !== '...';
+        }
+        if (executable === 'git')
+            return isAllowedGitCommand(args);
+        if (executable === 'github')
+            return args.length >= 1;
+        return executable === 'agent-browser' || executable === 'workspace-list';
+    };
     const add = (raw) => {
         const command = raw.trim().replace(/[.;]+$/, '');
         if (!isToolCommand(command))
+            return;
+        if (!isRunnable(command))
             return;
         if (seen.has(command))
             return;
         seen.add(command);
         commands.push(command);
     };
-    for (const match of reply.matchAll(/`((?:agent-browser|git|github)\s+[^`]+)`/g)) {
+    for (const match of reply.matchAll(/`((?:agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write)(?:\s+[^`]+)?)`/g)) {
         add(match[1] || '');
     }
     for (const line of reply.split('\n')) {
@@ -472,6 +529,62 @@ async function runGithubPseudoCommand(args) {
     }
     return `Unsupported github command: ${['github', ...args].join(' ')}. Supported: github status, github push [branch], github whoami.`;
 }
+function resolveWorkspacePath(inputPath, defaultBase = COMMON_DIR) {
+    const requested = inputPath || '.';
+    const base = requested.startsWith('/workspace/group')
+        ? GROUP_DIR
+        : requested.startsWith('/workspace/common')
+            ? COMMON_DIR
+            : defaultBase;
+    const fullPath = path.resolve(base, requested.startsWith('/workspace/group')
+        ? path.relative(GROUP_DIR, requested)
+        : requested.startsWith('/workspace/common')
+            ? path.relative(COMMON_DIR, requested)
+            : requested);
+    const rel = path.relative(base, fullPath);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+        throw new Error(`Path escapes workspace: ${inputPath}`);
+    }
+    return fullPath;
+}
+async function runWorkspaceCommand(command, args) {
+    try {
+        if (command === 'touch') {
+            const target = args[0];
+            if (!target)
+                return 'Usage: touch <path>';
+            const filePath = resolveWorkspacePath(target, COMMON_DIR);
+            fs.mkdirSync(path.dirname(filePath), { recursive: true });
+            fs.closeSync(fs.openSync(filePath, 'a'));
+            return `Touched ${filePath}`;
+        }
+        if (command === 'workspace-list') {
+            const dir = resolveWorkspacePath(args[0] || '.', COMMON_DIR);
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            return entries
+                .map((entry) => `${entry.isDirectory() ? 'dir ' : 'file'} ${entry.name}`)
+                .join('\n') || 'Workspace directory is empty.';
+        }
+        if (command === 'workspace-read') {
+            const filePath = resolveWorkspacePath(args[0] || '', COMMON_DIR);
+            return fs.readFileSync(filePath, 'utf8').slice(0, 20_000);
+        }
+        if (command === 'workspace-write') {
+            const target = args[0];
+            const content = args.slice(1).join(' ');
+            if (!target)
+                return 'Usage: workspace-write <path> <content>';
+            const filePath = resolveWorkspacePath(target, COMMON_DIR);
+            fs.mkdirSync(path.dirname(filePath), { recursive: true });
+            fs.writeFileSync(filePath, content.endsWith('\n') ? content : `${content}\n`);
+            return `Wrote ${Buffer.byteLength(content)} bytes to ${filePath}`;
+        }
+    }
+    catch (err) {
+        return `Workspace command failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    return `Unsupported workspace command: ${command}`;
+}
 async function runToolCommand(command) {
     const parts = shellSplit(command);
     const executable = parts[0];
@@ -488,6 +601,9 @@ async function runToolCommand(command) {
     }
     if (executable === 'github') {
         return runGithubPseudoCommand(args);
+    }
+    if (executable === 'touch' || executable === 'workspace-list' || executable === 'workspace-read' || executable === 'workspace-write') {
+        return runWorkspaceCommand(executable, args);
     }
     return `Skipped unsupported command: ${command}`;
 }
@@ -562,6 +678,13 @@ async function main() {
             },
         ],
     };
+    const systemPrompt = buildSystemPrompt(containerInput);
+    if (session.messages[0]?.role === 'system') {
+        session.messages[0].content = systemPrompt;
+    }
+    else {
+        session.messages.unshift({ role: 'system', content: systemPrompt });
+    }
     let prompt = containerInput.prompt;
     if (containerInput.isScheduledTask) {
         prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
