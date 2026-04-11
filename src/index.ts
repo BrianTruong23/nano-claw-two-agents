@@ -805,7 +805,7 @@ async function main(): Promise<void> {
     } catch (e) {}
 
     try {
-      const workspaceDir = path.resolve(process.cwd(), '../../workspace');
+      const workspaceDir = path.resolve(process.cwd(), '../workspace');
       if (!fs.existsSync(workspaceDir)) {
         fs.mkdirSync(workspaceDir, { recursive: true });
       }
@@ -868,7 +868,7 @@ async function main(): Promise<void> {
     } catch (e) {}
 
     try {
-      const workspaceDir = path.resolve(process.cwd(), '../../workspace');
+      const workspaceDir = path.resolve(process.cwd(), '../workspace');
       if (!fs.existsSync(workspaceDir)) {
         fs.mkdirSync(workspaceDir, { recursive: true });
       }
