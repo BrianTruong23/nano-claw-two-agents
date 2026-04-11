@@ -1,0 +1,28 @@
+# Workspace Data
+data/
+store/
+groups/
+logs/
+
+# Environment Variables
+.env
+*/.env
+*/*/.env
+
+# Node.js
+node_modules/
+dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# OS Files
+.DS_Store
+Thumbs.db
+*.swp
+
+# SQLite Databases
+*.db
+*.sqlite
+*.sqlite3
