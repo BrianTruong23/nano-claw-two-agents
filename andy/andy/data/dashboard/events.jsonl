@@ -4639,3 +4639,5 @@
 {"at":"2026-04-11T03:57:18.283Z","pid":83293,"level":"warn","role":"agent","msg":"Control-plane poll iteration failed","data":{"err":{},"activeTaskId":null}}
 {"at":"2026-04-11T03:57:28.164Z","pid":83293,"level":"warn","role":"agent","msg":"Control-plane heartbeat failed","data":{"err":{}}}
 {"at":"2026-04-11T03:57:28.286Z","pid":83293,"level":"warn","role":"agent","msg":"Control-plane poll iteration failed","data":{"err":{},"activeTaskId":null}}
+{"at":"2026-04-11T04:17:28.198Z","pid":83293,"level":"warn","role":"agent","msg":"Control-plane heartbeat failed","data":{"err":{}}}
+{"at":"2026-04-11T04:17:29.498Z","pid":83293,"level":"warn","role":"agent","msg":"Control-plane poll iteration failed","data":{"err":{},"activeTaskId":null}}

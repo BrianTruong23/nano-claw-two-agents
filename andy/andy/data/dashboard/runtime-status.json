@@ -3,8 +3,8 @@
   "pid": 83293,
   "status": "running",
   "startedAt": "2026-04-11T03:55:53.448Z",
-  "updatedAt": "2026-04-11T03:57:29.301Z",
-  "heartbeatAt": "2026-04-11T03:57:29.301Z",
+  "updatedAt": "2026-04-11T04:17:30.023Z",
+  "heartbeatAt": "2026-04-11T04:17:30.023Z",
   "defaultTrigger": "@Andy",
   "channels": [
     {
@@ -13,18 +13,18 @@
     }
   ],
   "queue": {
-    "activeCount": 1,
+    "activeCount": 0,
     "waitingGroups": [],
     "groups": {
       "tg:-5122778581": {
-        "active": true,
+        "active": false,
         "idleWaiting": true,
         "isTaskContainer": false,
         "runningTaskId": null,
         "pendingMessages": false,
         "pendingTaskCount": 0,
-        "containerName": "nanoclaw-telegram-group-1775879794479",
-        "groupFolder": "telegram_group",
+        "containerName": null,
+        "groupFolder": null,
         "retryCount": 0
       }
     }
