@@ -1,1 +1,35 @@
-# nano-claw-two-agents
+# NanoClaw Multi-Agent Orchestration
+
+Welcome to the NanoClaw Multi-Agent Orchestration repository. This repository hosts a tailored, containerized framework designed to natively deploy, coordinate, and scale distinct autonomous AI agents (in this deployment: **Andy** and **Bob**) that can easily collaborate on complex workflows.
+
+It aims to seamlessly bridge the gap between distinct agent runtimes, allowing for isolated task execution alongside synchronous, shared file manipulation in a secured local sandbox environment.
+
+## 🚀 Key Features
+
+* **Multi-Agent Collaboration:** Integrates multiple, fully-independent agent identities that can interact with you—and each other—dynamically in a shared setting. 
+* **Shared Workspaces:** Native integration with volume-mounted sandbox directories. Both agents can reliably read, write, manipulate, and download files simultaneously via the `/workspace/common` node without corrupting their independent conversation contexts. 
+* **Containerized Security:** The engine securely boots ephemeral container shells per request. Agents safely operate inside restricted bounds while natively leveraging expanded tooling like headless web scraping (powered by Brave Search), deep OS file manipulation infrastructure, and advanced Git workflow orchestration (`clone`, `checkout`, `stash`, `merge`).
+* **Git Subtree Architecture:** Agent cores (`andy/andy` and `bob/bob`) are structured as cleanly isolated Git subtrees. This dramatically minimizes repository clutter, standardizes environment setups, and allows seamless downstream updates directly from the overarching NanoClaw repository tree.
+
+## 📂 Repository Structure
+
+* `andy/andy/` — The primary NanoClaw engine natively configured and launched for the "Andy" agent perspective.
+* `bob/bob/` — The symmetrically provisioned engine configured and launched for "Bob".
+* `common/` — A shared local directory bind-mounted securely as `/workspace/common` inside both agent containers for synchronous collaboration, document exchange, and shared artifact generation.
+* `start.sh` — The orchestration shell script responsible for spinning up the local environment daemons and bridging IPC communications across the platform.
+
+## 🛠 Active Tool Capabilities
+
+Out-of-the-box, both agents are equipped with advanced node execution layers capable of routing:
+1. **Workspace File I/O**: `workspace-mkdir`, `workspace-copy`, `workspace-download`, `workspace-rename`, `workspace-delete`
+2. **Web Browser Automation**: Headless DOM exploration, payload extraction, snapshot taking, and fully-integrated fallback search processing.
+3. **GitHub State Management**: Vast, non-destructive native repository interactions including cloning upstream repos, fetching upstream differences, merging, and natively pushing compiled commits.
+
+## 💡 Quick Start
+
+1. To initially provision your sandbox, duplicate your environment keys globally:
+   - Prepare your `.env_andy` and copy it securely backwards to `andy/andy/.env`.
+   - Prepare your `.env_bob` and copy it securely backwards to `bob/bob/.env`.
+2. Ensure Docker or Podman is locally available to host the execution sandboxes.
+3. Launch the environment cleanly via `./start.sh`.
+4. Drop your instructions directly into the designated chat bridge and let Andy and Bob take over!
