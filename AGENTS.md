@@ -90,3 +90,8 @@ Adjust `nanoclaw` URL or push targets when the user names different GitHub repos
 ## Git clone into `/workspace/common`
 
 See [`docs/git-clone-into-common.md`](docs/git-clone-into-common.md) for agent-runner behavior (`workspace-git-clone`), rebuild steps, and a brainstorm of further reliability options.
+
+## Codex (terminal vs chat)
+
+- **Terminal (user):** run the **`codex`** CLI on the host for an interactive session (`cd` to the repo first). Documented for the in-container model in `andy/container/skills/coding-agent/SKILL.md` (same under `bob/`).
+- **Chat:** `/codex <task>` and natural-language variants are handled by the host (`andy/src/index.ts` / `bob/src/index.ts`, `extractCodexPrompt`); the container skill lists the phrases users can type.
