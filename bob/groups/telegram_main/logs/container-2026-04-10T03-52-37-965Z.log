@@ -1,0 +1,34 @@
+=== Container Run Log ===
+Timestamp: 2026-04-10T03:52:37.965Z
+Group: Brian Truong
+IsMain: true
+Duration: 472ms
+Exit Code: 125
+Stdout Truncated: false
+Stderr Truncated: false
+
+=== Input Summary ===
+Prompt length: 365 chars
+Session ID: new
+
+=== Container Args ===
+run -i --rm --name nanoclaw-telegram-main-1775793157494 -e TZ=America/Chicago --user 503:20 -e HOME=/home/node -v /Users/tht0021/Documents/nanoclaw:/workspace/project:ro -v /dev/null:/workspace/project/.env:ro -v /Users/tht0021/Documents/nanoclaw/store:/workspace/project/store -v /Users/tht0021/Documents/nanoclaw/groups/telegram_main:/workspace/group -v /Users/tht0021/Documents/nanoclaw/groups/global:/workspace/global -v /Users/tht0021/Documents/nanoclaw/data/sessions/telegram_main/.claude:/home/node/.claude -v /Users/tht0021/Documents/nanoclaw/data/ipc/telegram_main:/workspace/ipc -v /Users/tht0021/Documents/nanoclaw/data/sessions/telegram_main/agent-runner-src:/app/src nanoclaw-agent:latest
+
+=== Mounts ===
+/Users/tht0021/Documents/nanoclaw -> /workspace/project (ro)
+/dev/null -> /workspace/project/.env (ro)
+/Users/tht0021/Documents/nanoclaw/store -> /workspace/project/store
+/Users/tht0021/Documents/nanoclaw/groups/telegram_main -> /workspace/group
+/Users/tht0021/Documents/nanoclaw/groups/global -> /workspace/global
+/Users/tht0021/Documents/nanoclaw/data/sessions/telegram_main/.claude -> /home/node/.claude
+/Users/tht0021/Documents/nanoclaw/data/ipc/telegram_main -> /workspace/ipc
+/Users/tht0021/Documents/nanoclaw/data/sessions/telegram_main/agent-runner-src -> /app/src
+
+=== Stderr ===
+Unable to find image 'nanoclaw-agent:latest' locally
+docker: Error response from daemon: pull access denied for nanoclaw-agent, repository does not exist or may require 'docker login'
+
+Run 'docker run --help' for more information
+
+
+=== Stdout ===
