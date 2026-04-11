@@ -71,16 +71,17 @@ curl -s -X POST http://127.0.0.1:4780/api/agent/start
 
 The correct approach is to watch NanoClaw's SQLite database, not poll Telegram directly. This avoids racing with NanoClaw for `getUpdates`.
 
-**Important:** Use the DB path for the NanoClaw instance that is actually running. There may be multiple installs (e.g. `~/Desktop/nanoclaw` vs `~/Documents/nanoclaw`). Check which process is running:
+**Important:** Use the DB for the NanoClaw process you are monitoring. In this multi-agent repo, Andy uses `andy/store/messages.db` and Bob uses `bob/store/messages.db` (repo root = directory that contains both `andy/` and `bob/`). If you have other NanoClaw installs on disk, confirm with `ps` which `cwd` is running:
 
 ```bash
 ps aux | grep "dist/index\|src/index" | grep -v grep
 ```
 
-Then watch its DB:
+Then watch its DB (example: Andy — from repo root, or set `REPO` yourself):
 
 ```
-DB="/Users/tht0021/Desktop/nanoclaw/store/messages.db"
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+DB="$REPO/andy/store/messages.db"
 LAST_ID=$(sqlite3 "$DB" "SELECT MAX(CAST(id AS INTEGER)) FROM messages WHERE chat_jid='tg:-5122778581';" 2>/dev/null || echo 0)
 [ -z "$LAST_ID" ] && LAST_ID=0
 

@@ -9,12 +9,12 @@ It aims to seamlessly bridge the gap between distinct agent runtimes, allowing f
 * **Multi-Agent Collaboration:** Integrates multiple, fully-independent agent identities that can interact with you—and each other—dynamically in a shared setting. 
 * **Shared Workspaces:** Native integration with volume-mounted sandbox directories. Both agents can reliably read, write, manipulate, and download files simultaneously via the `/workspace/common` node without corrupting their independent conversation contexts. 
 * **Containerized Security:** The engine securely boots ephemeral container shells per request. Agents safely operate inside restricted bounds while natively leveraging expanded tooling like headless web scraping (powered by Brave Search), deep OS file manipulation infrastructure, and advanced Git workflow orchestration (`clone`, `checkout`, `stash`, `merge`).
-* **Git Subtree Architecture:** Agent cores (`andy/andy` and `bob/bob`) are structured as cleanly isolated Git subtrees. This dramatically minimizes repository clutter, standardizes environment setups, and allows seamless downstream updates directly from the overarching NanoClaw repository tree.
+* **Twin NanoClaw roots:** `andy/` and `bob/` each hold a full NanoClaw tree (separate processes, SQLite stores, and `.env`). You can still sync either side from upstream NanoClaw using git subtree or a manual merge workflow when you want updates.
 
 ## 📂 Repository Structure
 
-* `andy/andy/` — The primary NanoClaw engine natively configured and launched for the "Andy" agent perspective.
-* `bob/bob/` — The symmetrically provisioned engine configured and launched for "Bob".
+* `andy/` — NanoClaw instance for the "Andy" agent (`npm run build` / `node dist/index.js` from this directory).
+* `bob/` — NanoClaw instance for "Bob", same layout as `andy/`.
 * `common/` — A shared local directory bind-mounted securely as `/workspace/common` inside both agent containers for synchronous collaboration, document exchange, and shared artifact generation.
 * `start.sh` — The orchestration shell script responsible for spinning up the local environment daemons and bridging IPC communications across the platform.
 
@@ -28,8 +28,8 @@ Out-of-the-box, both agents are equipped with advanced node execution layers cap
 ## 💡 Quick Start
 
 1. To initially provision your sandbox, duplicate your environment keys globally:
-   - Prepare your `.env_andy` and copy it securely backwards to `andy/andy/.env`.
-   - Prepare your `.env_bob` and copy it securely backwards to `bob/bob/.env`.
+   - Prepare your `.env_andy` and copy it to `andy/.env`.
+   - Prepare your `.env_bob` and copy it to `bob/.env`.
 2. Ensure Docker or Podman is locally available to host the execution sandboxes.
 3. Launch the environment cleanly via `./start.sh`.
 4. Drop your instructions directly into the designated chat bridge and let Andy and Bob take over!

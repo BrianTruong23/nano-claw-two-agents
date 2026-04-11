@@ -4,8 +4,9 @@
 # Messages are written as is_bot_message=1 so they appear in context
 # but don't trigger a new agent response (preventing infinite loops).
 
-ANDY_DB="/Users/tht0021/Documents/nano-claw-agents/andy/andy/store/messages.db"
-BOB_DB="/Users/tht0021/Documents/nano-claw-agents/bob/bob/store/messages.db"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANDY_DB="$SCRIPT_DIR/andy/store/messages.db"
+BOB_DB="$SCRIPT_DIR/bob/store/messages.db"
 GROUP_JID="tg:-5122778581"
 
 echo "[bridge] Started — syncing messages between Andy and Bob"

@@ -16,10 +16,10 @@ Files that should be visible to both Andy and Bob must go in:
 /workspace/common
 ```
 
-This maps to the host folder:
+This maps to the host folder (sibling of `andy/` and `bob/` in this repo):
 
 ```text
-/Users/tht0021/Documents/nano-claw-agents/common
+<repository-root>/common
 ```
 
 ## Chat-Specific Space
