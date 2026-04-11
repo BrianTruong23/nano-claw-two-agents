@@ -157,6 +157,23 @@ function saveState(): void {
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
+function messageAddressesOnlyOtherBot(message: NewMessage, group: RegisteredGroup): boolean {
+  if (OTHER_BOT_TRIGGERS.length === 0) return false;
+  const content = message.content.trim();
+  const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+  const myPattern = getTriggerPattern(group.trigger);
+  const addressesOther = otherPatterns.some((p) => p.test(content));
+  const addressesMe = myPattern.test(content);
+  return addressesOther && !addressesMe;
+}
+
+function retryMessageCheckSoon(chatJid: string): void {
+  setTimeout(() => {
+    queue.enqueueMessageCheck(chatJid);
+    queue.closeStdin(chatJid);
+  }, 2000);
+}
+
 function registerGroup(jid: string, group: RegisteredGroup): void {
   let groupDir: string;
   try {
@@ -254,15 +271,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  const newestHumanMsg = [...missedMessages]
+    .reverse()
+    .find((m) => !m.is_from_me && !m.is_bot_message);
+  if (!WAIT_FOR_BOT_RESPONSE && !newestHumanMsg) {
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    return true;
+  }
+
   // Multi-bot coordination: skip if messages exclusively address the other bot
   if (OTHER_BOT_TRIGGERS.length > 0) {
     const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
     const myPattern = getTriggerPattern(group.trigger);
     const hasOther = missedMessages.some(
-      (m) => !m.is_from_me && otherPatterns.some((p) => p.test(m.content.trim())),
+      (m) =>
+        !m.is_from_me &&
+        !m.is_bot_message &&
+        otherPatterns.some((p) => p.test(m.content.trim())),
     );
     const hasMine = missedMessages.some(
-      (m) => !m.is_from_me && myPattern.test(m.content.trim()),
+      (m) => !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
     );
     if (hasOther && !hasMine) return true;
   }
@@ -272,15 +302,18 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const myPattern = getTriggerPattern(group.trigger);
     const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
     const hasMyTrigger = missedMessages.some(
-      (m) => !m.is_from_me && myPattern.test(m.content.trim()),
+      (m) => !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
     );
     const hasOtherTrigger = missedMessages.some(
-      (m) => !m.is_from_me && otherPatterns.some((p) => p.test(m.content.trim())),
+      (m) =>
+        !m.is_from_me &&
+        !m.is_bot_message &&
+        otherPatterns.some((p) => p.test(m.content.trim())),
     );
     if (!hasMyTrigger && !hasOtherTrigger) {
-      const cursor = lastAgentTimestamp[chatJid] || '';
+      const cursor = newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
       if (!hasCrossBotResponse(chatJid, cursor)) {
-        setTimeout(() => queue.enqueueMessageCheck(chatJid), 2000);
+        retryMessageCheckSoon(chatJid);
         return true; // Primary bot hasn't responded yet — wait and poll again
       }
     }
@@ -544,13 +577,11 @@ async function startMessageLoop(): Promise<void> {
 
           // Prevent active containers from intercepting messages addressed to the other bot
           if (OTHER_BOT_TRIGGERS.length > 0) {
-            const newestHumanMsg = [...groupMessages].reverse().find((m) => !m.is_from_me);
+            const newestHumanMsg = [...groupMessages]
+              .reverse()
+              .find((m) => !m.is_from_me && !m.is_bot_message);
             if (newestHumanMsg) {
-              const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
-              const myPattern = getTriggerPattern(group.trigger);
-              const addressesOther = otherPatterns.some((p) => p.test(newestHumanMsg.content.trim()));
-              const addressesMe = myPattern.test(newestHumanMsg.content.trim());
-              if (addressesOther && !addressesMe) continue;
+              if (messageAddressesOnlyOtherBot(newestHumanMsg, group)) continue;
             }
           }
 
@@ -567,6 +598,36 @@ async function startMessageLoop(): Promise<void> {
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
+          }
+
+          // Secondary bot ordering must also apply in the hot path where
+          // an active container can receive piped messages directly.
+          if (!isMainGroup && WAIT_FOR_BOT_RESPONSE && OTHER_BOT_TRIGGERS.length > 0) {
+            const myPattern = getTriggerPattern(group.trigger);
+            const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+            const hasMyTrigger = groupMessages.some(
+              (m) =>
+                !m.is_from_me &&
+                !m.is_bot_message &&
+                myPattern.test(m.content.trim()),
+            );
+            const hasOtherTrigger = groupMessages.some(
+              (m) =>
+                !m.is_from_me &&
+                !m.is_bot_message &&
+                otherPatterns.some((p) => p.test(m.content.trim())),
+            );
+            if (!hasMyTrigger && !hasOtherTrigger) {
+              const newestHumanMsg = [...groupMessages]
+                .reverse()
+                .find((m) => !m.is_from_me && !m.is_bot_message);
+              const cursor =
+                newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
+              if (!hasCrossBotResponse(chatJid, cursor)) {
+                retryMessageCheckSoon(chatJid);
+                continue;
+              }
+            }
           }
 
           // Pull all messages since lastAgentTimestamp so non-trigger
