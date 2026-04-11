@@ -37,6 +37,27 @@ pkill -f "nano-claw-agents/.*/dist/index.js" 2>/dev/null || true
 pkill -f "bot-bridge.sh" 2>/dev/null || true
 sleep 1
 
+# NanoClaw reads `.env` from each agent directory (cwd). Seed from repo-root templates if missing.
+sync_agent_env() {
+  local agent_dir="$1"
+  local template="$2"
+  local name
+  name="$(basename "$agent_dir")"
+  if [[ -f "$agent_dir/.env" ]]; then
+    return 0
+  fi
+  if [[ -f "$template" ]]; then
+    cp "$template" "$agent_dir/.env"
+    echo "Created $name/.env from $(basename "$template")"
+    return 0
+  fi
+  echo "ERROR: $name/.env is missing and template not found: $template" >&2
+  echo "  Copy your secrets to $agent_dir/.env (see README Quick Start)." >&2
+  exit 1
+}
+sync_agent_env "$SCRIPT_DIR/andy" "$SCRIPT_DIR/.env_andy"
+sync_agent_env "$SCRIPT_DIR/bob" "$SCRIPT_DIR/.env_bob"
+
 # Rebuild when dist is missing, incomplete, or older than any src/*.ts (avoids ERR_MODULE_NOT_FOUND after pulls).
 ensure_agent_build() {
   local root="$1"
