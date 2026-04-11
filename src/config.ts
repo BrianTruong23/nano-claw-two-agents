@@ -122,7 +122,19 @@ function escapeRegex(str: string): string {
 }
 
 export function buildTriggerPattern(trigger: string): RegExp {
-  return new RegExp(`^${escapeRegex(trigger.trim())}\\b`, 'i');
+  const alternatives = trigger
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .map((normalizedTrigger) => {
+      const triggerBody = normalizedTrigger.startsWith('@')
+        ? normalizedTrigger.slice(1)
+        : normalizedTrigger;
+      const atPrefix = normalizedTrigger.startsWith('@') ? '@?' : '';
+      return `${atPrefix}${escapeRegex(triggerBody)}`;
+    });
+
+  return new RegExp(`^(?:${alternatives.join('|')})\\b`, 'i');
 }
 
 export const DEFAULT_TRIGGER = `@${ASSISTANT_NAME}`;

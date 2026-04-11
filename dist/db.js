@@ -240,7 +240,7 @@ export function getNewMessages(jids, lastTimestamp, botPrefix, limit = 200) {
     const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name
       FROM messages
       WHERE timestamp > ? AND chat_jid IN (${placeholders})
         AND is_bot_message = 0 AND content NOT LIKE ?
@@ -266,10 +266,10 @@ export function getMessagesSince(chatJid, sinceTimestamp, botPrefix, limit = 200
     const sql = `
     SELECT * FROM (
       SELECT id, chat_jid, sender, sender_name, content, timestamp, is_from_me,
-             reply_to_message_id, reply_to_message_content, reply_to_sender_name
+             is_bot_message, reply_to_message_id, reply_to_message_content, reply_to_sender_name
       FROM messages
       WHERE chat_jid = ? AND timestamp > ?
-        AND NOT (is_bot_message = 1 AND is_from_me = 1) AND content NOT LIKE ?
+        AND (is_bot_message = 0 OR id LIKE 'xbot_%') AND content NOT LIKE ?
         AND content != '' AND content IS NOT NULL
       ORDER BY timestamp DESC
       LIMIT ?

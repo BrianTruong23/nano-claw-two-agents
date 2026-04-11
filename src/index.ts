@@ -784,26 +784,23 @@ async function main(): Promise<void> {
     msg: NewMessage,
   ): Promise<void> {
     const group = registeredGroups[chatJid];
-    if (!group?.isMain) {
+    if (!group) {
       const channel = findChannel(channels, chatJid);
       if (channel) {
-        await channel.sendMessage(
-          chatJid,
-          'Codex commands are only enabled from the main NanoClaw group.',
-        );
+        await channel.sendMessage(chatJid, 'Codex commands are only enabled in registered chats.');
       }
       logger.warn(
         { chatJid, sender: msg.sender },
-        'Codex command rejected: not main group',
+        'Codex command rejected: unregistered chat',
       );
       return;
     }
 
-    const prompt = command.replace(/^\/codex\b/i, '').trim();
+    const prompt = command.replace(/^\/(?:codex|claude)\b/i, '').trim();
     if (!prompt) {
       const channel = findChannel(channels, chatJid);
       if (channel) {
-        await channel.sendMessage(chatJid, 'Usage: /codex <coding task>');
+        await channel.sendMessage(chatJid, 'Usage: /codex or /claude <coding task>');
       }
       return;
     }
@@ -817,7 +814,11 @@ async function main(): Promise<void> {
     } catch (e) {}
 
     try {
-      const result = await runCodexExec(prompt, process.cwd());
+      const workspaceDir = path.resolve(process.cwd(), '../../workspace');
+      if (!fs.existsSync(workspaceDir)) {
+        fs.mkdirSync(workspaceDir, { recursive: true });
+      }
+      const result = await runCodexExec(prompt, workspaceDir);
       try {
         await channel.setTyping?.(chatJid, false);
       } catch (e) {}
@@ -842,17 +843,23 @@ async function main(): Promise<void> {
 
   function extractCodexPrompt(text: string): string | null {
     const trimmed = text.trim();
-    if (/^\/codex\b/i.test(trimmed)) {
-      const prompt = trimmed.replace(/^\/codex\b[:\s-]*/i, '').trim();
+    if (/^\/(?:codex|claude)\b/i.test(trimmed)) {
+      const prompt = trimmed.replace(/^\/(?:codex|claude)\b[:\s-]*/i, '').trim();
       return prompt || null;
     }
 
     const naturalLanguagePatterns = [
-      /^use codex (?:to |for )?(.*)$/i,
-      /^spawn codex (?:to |for )?(.*)$/i,
-      /^have codex (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
-      /^ask codex (?:to )?(.*)$/i,
-      /^codex[:,]?\s*(.*)$/i,
+      /^use (?:codex|claude) (?:to |for )?(.*)$/i,
+      /^spawn (?:codex|claude) (?:to |for )?(.*)$/i,
+      /^have (?:codex|claude) (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+      /^ask (?:codex|claude) (?:to )?(.*)$/i,
+      /^(?:codex|claude)[:,]?\s*(.*)$/i,
+      /^use (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
+      /^spawn (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
+      /^have (?:the )?(?:coding|code) agent (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+      /^ask (?:the )?(?:coding|code) agent (?:to )?(.*)$/i,
+      /^(?:coding|code) agent[:,]?\s*(.*)$/i,
+      /^(commit .* and push(?: .*github)?|push .* to github|push to github)$/i,
     ];
 
     for (const pattern of naturalLanguagePatterns) {
@@ -877,9 +884,18 @@ async function main(): Promise<void> {
       }
       const codexPrompt = extractCodexPrompt(trimmed);
       if (codexPrompt) {
-        handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch((err) =>
-          logger.error({ err, chatJid }, 'Codex command error'),
-        );
+        const group = registeredGroups[chatJid];
+        const myPattern = group ? getTriggerPattern(group.trigger) : null;
+        const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+        const addressesMe = !!myPattern?.test(trimmed);
+        const addressesOther = otherPatterns.some((p) => p.test(trimmed));
+        const shouldHandleCodex =
+          group?.isMain || addressesMe || (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
+        if (shouldHandleCodex) {
+          handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch((err) =>
+            logger.error({ err, chatJid }, 'Codex command error'),
+          );
+        }
         return;
       }
 

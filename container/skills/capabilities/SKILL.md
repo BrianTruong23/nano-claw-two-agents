@@ -59,6 +59,8 @@ Check for executable tools in the container:
 
 ```bash
 which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not found"
+git --version 2>/dev/null || echo "git: not found"
+github status
 ```
 
 ### 5. Group info
@@ -77,6 +79,8 @@ Present the report as a clean, readable message. Example:
 
 *Installed Skills:*
 • /agent-browser — Browse the web, fill forms, extract data
+• /github — Inspect Git/GitHub state and push committed work
+• /coding-agent — Route code edits, tests, commits, and pushes to Codex
 • /capabilities — This report
 (list all found skills)
 
@@ -88,6 +92,7 @@ Present the report as a clean, readable message. Example:
 
 *Container Tools:*
 • agent-browser: ✓
+• Git/GitHub: ✓ / unavailable
 
 *System:*
 • Group memory: yes/no

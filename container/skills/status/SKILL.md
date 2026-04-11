@@ -56,6 +56,8 @@ Confirm which tool families are available to you:
 
 ```bash
 which agent-browser 2>/dev/null && echo "agent-browser: available" || echo "agent-browser: not installed"
+git --version 2>/dev/null || echo "git: not installed"
+github status
 node --version 2>/dev/null
 claude --version 2>/dev/null
 ```
@@ -92,6 +94,7 @@ Present as a clean, readable message:
 
 *Container:*
 • agent-browser: ✓ / not installed
+• Git/GitHub: ✓ / unavailable
 • Node: vXX.X.X
 • Claude Code: vX.X.X
 

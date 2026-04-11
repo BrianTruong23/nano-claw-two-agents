@@ -13,8 +13,12 @@ const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const SCRIPT_TIMEOUT_MS = 30_000;
+const TOOL_TIMEOUT_MS = 30_000;
+const MAX_TOOL_ITERATIONS = 4;
+const MAX_TOOL_COMMANDS_PER_TURN = 4;
 const GROUP_DIR = '/workspace/group';
 const GLOBAL_DIR = '/workspace/global';
+const PROJECT_DIR = '/workspace/project';
 const SESSIONS_DIR = path.join(GROUP_DIR, '.nanoclaw-sessions');
 const CONVERSATIONS_DIR = path.join(GROUP_DIR, 'conversations');
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -87,6 +91,13 @@ function readOptionalFile(filePath) {
         return null;
     }
 }
+function appendMemoryFile(parts, label, baseDir, filename) {
+    const content = readOptionalFile(path.join(baseDir, filename));
+    if (!content)
+        return;
+    parts.push(`${label} (${filename}):`);
+    parts.push(content);
+}
 function buildSystemPrompt(containerInput) {
     const parts = [
         `You are ${containerInput.assistantName || 'Andy'}, the NanoClaw assistant replying inside a chat.`,
@@ -104,6 +115,12 @@ function buildSystemPrompt(containerInput) {
         parts.push('Group-specific memory/context:');
         parts.push(groupMemory);
     }
+    appendMemoryFile(parts, 'Global personality memory', GLOBAL_DIR, 'soul.md');
+    appendMemoryFile(parts, 'Global user context', GLOBAL_DIR, 'user.md');
+    appendMemoryFile(parts, 'Global heartbeat/status context', GLOBAL_DIR, 'heartbeat.md');
+    appendMemoryFile(parts, 'Group personality memory', GROUP_DIR, 'soul.md');
+    appendMemoryFile(parts, 'Group user context', GROUP_DIR, 'user.md');
+    appendMemoryFile(parts, 'Group heartbeat/status context', GROUP_DIR, 'heartbeat.md');
     return parts.join('\n\n');
 }
 function toMarkdownTitle(messages) {
@@ -290,10 +307,217 @@ async function runScript(script) {
         });
     });
 }
+function shellSplit(command) {
+    const args = [];
+    let current = '';
+    let quote = null;
+    let escaping = false;
+    for (const char of command.trim()) {
+        if (escaping) {
+            current += char;
+            escaping = false;
+            continue;
+        }
+        if (char === '\\') {
+            escaping = true;
+            continue;
+        }
+        if (quote) {
+            if (char === quote) {
+                quote = null;
+            }
+            else {
+                current += char;
+            }
+            continue;
+        }
+        if (char === '"' || char === "'") {
+            quote = char;
+            continue;
+        }
+        if (/\s/.test(char)) {
+            if (current) {
+                args.push(current);
+                current = '';
+            }
+            continue;
+        }
+        current += char;
+    }
+    if (current)
+        args.push(current);
+    return args;
+}
+function normalizeAgentBrowserArgs(args) {
+    if (args[0] !== 'open' || !args[1])
+        return args;
+    const target = args.slice(1).join(' ').trim();
+    if (/^(https?:|about:)/i.test(target))
+        return ['open', target];
+    return ['open', `https://www.google.com/search?q=${encodeURIComponent(target)}`];
+}
+function isAllowedGitCommand(args) {
+    const subcommand = args[0];
+    if (!subcommand)
+        return false;
+    return new Set([
+        'add',
+        'branch',
+        'commit',
+        'diff',
+        'fetch',
+        'log',
+        'pull',
+        'push',
+        'remote',
+        'status',
+    ]).has(subcommand);
+}
+function isToolCommand(command) {
+    return /^(agent-browser|git|github)\b/.test(command.trim());
+}
+function extractToolCommands(reply) {
+    const commands = [];
+    const seen = new Set();
+    const add = (raw) => {
+        const command = raw.trim().replace(/[.;]+$/, '');
+        if (!isToolCommand(command))
+            return;
+        if (seen.has(command))
+            return;
+        seen.add(command);
+        commands.push(command);
+    };
+    for (const match of reply.matchAll(/`((?:agent-browser|git|github)\s+[^`]+)`/g)) {
+        add(match[1] || '');
+    }
+    for (const line of reply.split('\n')) {
+        const trimmed = line.trim().replace(/^[$>]\s*/, '');
+        if (isToolCommand(trimmed))
+            add(trimmed);
+    }
+    return commands.slice(0, MAX_TOOL_COMMANDS_PER_TURN);
+}
+function commandCwd() {
+    return fs.existsSync(PROJECT_DIR) ? PROJECT_DIR : GROUP_DIR;
+}
+function gitEnv() {
+    const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+    const env = {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+    };
+    if (!token)
+        return env;
+    const askPassPath = '/tmp/nanoclaw-git-askpass.sh';
+    fs.writeFileSync(askPassPath, '#!/bin/sh\ncase "$1" in\n*Username*) printf "%s\\n" "x-access-token" ;;\n*) printf "%s\\n" "$GITHUB_TOKEN" ;;\nesac\n', { mode: 0o700 });
+    env.GIT_ASKPASS = askPassPath;
+    env.GITHUB_TOKEN = token;
+    env.GH_TOKEN = token;
+    return env;
+}
+async function execCommand(executable, args, options) {
+    return new Promise((resolve) => {
+        execFile(executable, args, {
+            cwd: options?.cwd,
+            env: options?.env || process.env,
+            timeout: options?.timeoutMs || TOOL_TIMEOUT_MS,
+            maxBuffer: 1024 * 1024,
+        }, (error, stdout, stderr) => {
+            const output = [
+                stdout.trim() ? `stdout:\n${stdout.trim()}` : '',
+                stderr.trim() ? `stderr:\n${stderr.trim()}` : '',
+                error ? `error:\n${error.message}` : '',
+            ]
+                .filter(Boolean)
+                .join('\n\n');
+            resolve(output || 'Command completed with no output.');
+        });
+    });
+}
+async function runGithubPseudoCommand(args) {
+    const action = args[0] || 'status';
+    if (action === 'status') {
+        const [status, remote, branch] = await Promise.all([
+            execCommand('git', ['status', '--short', '--branch'], {
+                cwd: commandCwd(),
+                env: gitEnv(),
+            }),
+            execCommand('git', ['remote', '-v'], { cwd: commandCwd(), env: gitEnv() }),
+            execCommand('git', ['branch', '--show-current'], {
+                cwd: commandCwd(),
+                env: gitEnv(),
+            }),
+        ]);
+        return [`git status:\n${status}`, `git remote:\n${remote}`, `branch:\n${branch}`].join('\n\n');
+    }
+    if (action === 'push') {
+        const branch = args[1];
+        const pushArgs = branch ? ['push', 'origin', branch] : ['push'];
+        return execCommand('git', pushArgs, { cwd: commandCwd(), env: gitEnv(), timeoutMs: 120_000 });
+    }
+    if (action === 'whoami') {
+        const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+        if (!token)
+            return 'No GITHUB_TOKEN/GH_TOKEN is available.';
+        const response = await fetch('https://api.github.com/user', {
+            headers: {
+                Authorization: `Bearer ${token}`,
+                Accept: 'application/vnd.github+json',
+                'User-Agent': 'NanoClaw',
+            },
+        });
+        const text = await response.text();
+        return `GitHub API status ${response.status}\n${text.slice(0, 4000)}`;
+    }
+    return `Unsupported github command: ${['github', ...args].join(' ')}. Supported: github status, github push [branch], github whoami.`;
+}
+async function runToolCommand(command) {
+    const parts = shellSplit(command);
+    const executable = parts[0];
+    const args = parts.slice(1);
+    if (executable === 'agent-browser') {
+        return execCommand('agent-browser', normalizeAgentBrowserArgs(args));
+    }
+    if (executable === 'git') {
+        if (!isAllowedGitCommand(args)) {
+            return `Skipped unsupported git command: ${command}`;
+        }
+        const timeoutMs = args[0] === 'push' || args[0] === 'pull' || args[0] === 'fetch' ? 120_000 : TOOL_TIMEOUT_MS;
+        return execCommand('git', args, { cwd: commandCwd(), env: gitEnv(), timeoutMs });
+    }
+    if (executable === 'github') {
+        return runGithubPseudoCommand(args);
+    }
+    return `Skipped unsupported command: ${command}`;
+}
+async function runToolCommands(commands) {
+    const results = [];
+    for (const command of commands) {
+        log(`Running tool command: ${command}`);
+        const output = await runToolCommand(command);
+        results.push(`$ ${command}\n${output}`);
+    }
+    return results.join('\n\n---\n\n');
+}
 async function runTurn(prompt, session, containerInput) {
     session.messages.push({ role: 'user', content: prompt });
-    const reply = await queryOpenRouter(session, containerInput);
-    session.messages.push({ role: 'assistant', content: reply });
+    let reply = '';
+    for (let iteration = 0; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
+        reply = await queryOpenRouter(session, containerInput);
+        const commands = extractToolCommands(reply);
+        if (commands.length === 0 || iteration === MAX_TOOL_ITERATIONS) {
+            session.messages.push({ role: 'assistant', content: reply });
+            break;
+        }
+        session.messages.push({ role: 'assistant', content: reply });
+        const toolResults = await runToolCommands(commands);
+        session.messages.push({
+            role: 'user',
+            content: `[Tool results from executed commands]\n\n${toolResults}\n\n` +
+                'Use these results to answer the user directly. Do not print tool commands unless you still need another tool action.',
+        });
+    }
     saveSession(session);
     return reply;
 }

@@ -76,6 +76,22 @@ function saveState() {
     setRouterState('last_timestamp', lastTimestamp);
     setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
+function messageAddressesOnlyOtherBot(message, group) {
+    if (OTHER_BOT_TRIGGERS.length === 0)
+        return false;
+    const content = message.content.trim();
+    const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+    const myPattern = getTriggerPattern(group.trigger);
+    const addressesOther = otherPatterns.some((p) => p.test(content));
+    const addressesMe = myPattern.test(content);
+    return addressesOther && !addressesMe;
+}
+function retryMessageCheckSoon(chatJid) {
+    setTimeout(() => {
+        queue.enqueueMessageCheck(chatJid);
+        queue.closeStdin(chatJid);
+    }, 2000);
+}
 function registerGroup(jid, group) {
     let groupDir;
     try {
@@ -145,12 +161,23 @@ async function processGroupMessages(chatJid) {
     const missedMessages = getMessagesSince(chatJid, getOrRecoverCursor(chatJid), ASSISTANT_NAME, MAX_MESSAGES_PER_PROMPT);
     if (missedMessages.length === 0)
         return true;
+    const newestHumanMsg = [...missedMessages]
+        .reverse()
+        .find((m) => !m.is_from_me && !m.is_bot_message);
+    if (!WAIT_FOR_BOT_RESPONSE && !newestHumanMsg) {
+        lastAgentTimestamp[chatJid] =
+            missedMessages[missedMessages.length - 1].timestamp;
+        saveState();
+        return true;
+    }
     // Multi-bot coordination: skip if messages exclusively address the other bot
     if (OTHER_BOT_TRIGGERS.length > 0) {
         const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
         const myPattern = getTriggerPattern(group.trigger);
-        const hasOther = missedMessages.some((m) => !m.is_from_me && otherPatterns.some((p) => p.test(m.content.trim())));
-        const hasMine = missedMessages.some((m) => !m.is_from_me && myPattern.test(m.content.trim()));
+        const hasOther = missedMessages.some((m) => !m.is_from_me &&
+            !m.is_bot_message &&
+            otherPatterns.some((p) => p.test(m.content.trim())));
+        const hasMine = missedMessages.some((m) => !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()));
         if (hasOther && !hasMine)
             return true;
     }
@@ -158,12 +185,14 @@ async function processGroupMessages(chatJid) {
     if (!isMainGroup && WAIT_FOR_BOT_RESPONSE && OTHER_BOT_TRIGGERS.length > 0) {
         const myPattern = getTriggerPattern(group.trigger);
         const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
-        const hasMyTrigger = missedMessages.some((m) => !m.is_from_me && myPattern.test(m.content.trim()));
-        const hasOtherTrigger = missedMessages.some((m) => !m.is_from_me && otherPatterns.some((p) => p.test(m.content.trim())));
+        const hasMyTrigger = missedMessages.some((m) => !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()));
+        const hasOtherTrigger = missedMessages.some((m) => !m.is_from_me &&
+            !m.is_bot_message &&
+            otherPatterns.some((p) => p.test(m.content.trim())));
         if (!hasMyTrigger && !hasOtherTrigger) {
-            const cursor = lastAgentTimestamp[chatJid] || '';
+            const cursor = newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
             if (!hasCrossBotResponse(chatJid, cursor)) {
-                setTimeout(() => queue.enqueueMessageCheck(chatJid), 2000);
+                retryMessageCheckSoon(chatJid);
                 return true; // Primary bot hasn't responded yet — wait and poll again
             }
         }
@@ -353,13 +382,11 @@ async function startMessageLoop() {
                     const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
                     // Prevent active containers from intercepting messages addressed to the other bot
                     if (OTHER_BOT_TRIGGERS.length > 0) {
-                        const newestHumanMsg = [...groupMessages].reverse().find((m) => !m.is_from_me);
+                        const newestHumanMsg = [...groupMessages]
+                            .reverse()
+                            .find((m) => !m.is_from_me && !m.is_bot_message);
                         if (newestHumanMsg) {
-                            const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
-                            const myPattern = getTriggerPattern(group.trigger);
-                            const addressesOther = otherPatterns.some((p) => p.test(newestHumanMsg.content.trim()));
-                            const addressesMe = myPattern.test(newestHumanMsg.content.trim());
-                            if (addressesOther && !addressesMe)
+                            if (messageAddressesOnlyOtherBot(newestHumanMsg, group))
                                 continue;
                         }
                     }
@@ -374,6 +401,28 @@ async function startMessageLoop() {
                                 isTriggerAllowed(chatJid, m.sender, allowlistCfg)));
                         if (!hasTrigger)
                             continue;
+                    }
+                    // Secondary bot ordering must also apply in the hot path where
+                    // an active container can receive piped messages directly.
+                    if (!isMainGroup && WAIT_FOR_BOT_RESPONSE && OTHER_BOT_TRIGGERS.length > 0) {
+                        const myPattern = getTriggerPattern(group.trigger);
+                        const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+                        const hasMyTrigger = groupMessages.some((m) => !m.is_from_me &&
+                            !m.is_bot_message &&
+                            myPattern.test(m.content.trim()));
+                        const hasOtherTrigger = groupMessages.some((m) => !m.is_from_me &&
+                            !m.is_bot_message &&
+                            otherPatterns.some((p) => p.test(m.content.trim())));
+                        if (!hasMyTrigger && !hasOtherTrigger) {
+                            const newestHumanMsg = [...groupMessages]
+                                .reverse()
+                                .find((m) => !m.is_from_me && !m.is_bot_message);
+                            const cursor = newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
+                            if (!hasCrossBotResponse(chatJid, cursor)) {
+                                retryMessageCheckSoon(chatJid);
+                                continue;
+                            }
+                        }
                     }
                     // Pull all messages since lastAgentTimestamp so non-trigger
                     // context that accumulated between triggers is included.
@@ -485,19 +534,19 @@ async function main() {
     }
     async function handleCodexCommand(command, chatJid, msg) {
         const group = registeredGroups[chatJid];
-        if (!group?.isMain) {
+        if (!group) {
             const channel = findChannel(channels, chatJid);
             if (channel) {
-                await channel.sendMessage(chatJid, 'Codex commands are only enabled from the main NanoClaw group.');
+                await channel.sendMessage(chatJid, 'Codex commands are only enabled in registered chats.');
             }
-            logger.warn({ chatJid, sender: msg.sender }, 'Codex command rejected: not main group');
+            logger.warn({ chatJid, sender: msg.sender }, 'Codex command rejected: unregistered chat');
             return;
         }
-        const prompt = command.replace(/^\/codex\b/i, '').trim();
+        const prompt = command.replace(/^\/(?:codex|claude)\b/i, '').trim();
         if (!prompt) {
             const channel = findChannel(channels, chatJid);
             if (channel) {
-                await channel.sendMessage(chatJid, 'Usage: /codex <coding task>');
+                await channel.sendMessage(chatJid, 'Usage: /codex or /claude <coding task>');
             }
             return;
         }
@@ -510,7 +559,11 @@ async function main() {
         }
         catch (e) { }
         try {
-            const result = await runCodexExec(prompt, process.cwd());
+            const workspaceDir = path.resolve(process.cwd(), '../../workspace');
+            if (!fs.existsSync(workspaceDir)) {
+                fs.mkdirSync(workspaceDir, { recursive: true });
+            }
+            const result = await runCodexExec(prompt, workspaceDir);
             try {
                 await channel.setTyping?.(chatJid, false);
             }
@@ -532,16 +585,22 @@ async function main() {
     }
     function extractCodexPrompt(text) {
         const trimmed = text.trim();
-        if (/^\/codex\b/i.test(trimmed)) {
-            const prompt = trimmed.replace(/^\/codex\b[:\s-]*/i, '').trim();
+        if (/^\/(?:codex|claude)\b/i.test(trimmed)) {
+            const prompt = trimmed.replace(/^\/(?:codex|claude)\b[:\s-]*/i, '').trim();
             return prompt || null;
         }
         const naturalLanguagePatterns = [
-            /^use codex (?:to |for )?(.*)$/i,
-            /^spawn codex (?:to |for )?(.*)$/i,
-            /^have codex (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
-            /^ask codex (?:to )?(.*)$/i,
-            /^codex[:,]?\s*(.*)$/i,
+            /^use (?:codex|claude) (?:to |for )?(.*)$/i,
+            /^spawn (?:codex|claude) (?:to |for )?(.*)$/i,
+            /^have (?:codex|claude) (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+            /^ask (?:codex|claude) (?:to )?(.*)$/i,
+            /^(?:codex|claude)[:,]?\s*(.*)$/i,
+            /^use (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
+            /^spawn (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
+            /^have (?:the )?(?:coding|code) agent (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+            /^ask (?:the )?(?:coding|code) agent (?:to )?(.*)$/i,
+            /^(?:coding|code) agent[:,]?\s*(.*)$/i,
+            /^(commit .* and push(?: .*github)?|push .* to github|push to github)$/i,
         ];
         for (const pattern of naturalLanguagePatterns) {
             const match = trimmed.match(pattern);
@@ -562,7 +621,15 @@ async function main() {
             }
             const codexPrompt = extractCodexPrompt(trimmed);
             if (codexPrompt) {
-                handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch((err) => logger.error({ err, chatJid }, 'Codex command error'));
+                const group = registeredGroups[chatJid];
+                const myPattern = group ? getTriggerPattern(group.trigger) : null;
+                const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+                const addressesMe = !!myPattern?.test(trimmed);
+                const addressesOther = otherPatterns.some((p) => p.test(trimmed));
+                const shouldHandleCodex = group?.isMain || addressesMe || (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
+                if (shouldHandleCodex) {
+                    handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch((err) => logger.error({ err, chatJid }, 'Codex command error'));
+                }
                 return;
             }
             // Sender allowlist drop mode: discard messages from denied senders before storing

@@ -67,12 +67,25 @@ class TelegramChannel {
     }
     async sendMessage(jid, text) {
         const chatId = this.chatIdFromJid(jid);
-        await this.api('sendMessage', {
+        const sent = await this.api('sendMessage', {
             method: 'POST',
             body: {
                 chat_id: chatId,
                 text,
             },
+        });
+        const timestamp = new Date(sent.date * 1000).toISOString();
+        this.opts.onMessage(jid, {
+            id: String(sent.message_id),
+            chat_jid: jid,
+            sender: sent.from
+                ? `tg:user:${sent.from.id}`
+                : `tg:user:${this.botUserId}`,
+            sender_name: buildSenderName(sent.from),
+            content: extractMessageText(sent),
+            timestamp,
+            is_from_me: true,
+            is_bot_message: true,
         });
     }
     async setTyping(jid, isTyping) {

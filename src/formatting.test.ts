@@ -194,9 +194,15 @@ describe('TRIGGER_PATTERN', () => {
     expect(TRIGGER_PATTERN.test(`@${name} hello`)).toBe(true);
   });
 
+  it('matches name without @ at start of message', () => {
+    expect(TRIGGER_PATTERN.test(`${name} hello`)).toBe(true);
+  });
+
   it('matches case-insensitively', () => {
     expect(TRIGGER_PATTERN.test(`@${lower} hello`)).toBe(true);
     expect(TRIGGER_PATTERN.test(`@${upper} hello`)).toBe(true);
+    expect(TRIGGER_PATTERN.test(`${lower} hello`)).toBe(true);
+    expect(TRIGGER_PATTERN.test(`${upper} hello`)).toBe(true);
   });
 
   it('does not match when not at start of message', () => {
@@ -226,6 +232,7 @@ describe('getTriggerPattern', () => {
     const pattern = getTriggerPattern('@Claw');
 
     expect(pattern.test('@Claw hello')).toBe(true);
+    expect(pattern.test('Claw hello')).toBe(true);
     expect(pattern.test(`@${ASSISTANT_NAME} hello`)).toBe(false);
   });
 
@@ -240,6 +247,16 @@ describe('getTriggerPattern', () => {
 
     expect(pattern.test('@C.L.A.U.D.E hello')).toBe(true);
     expect(pattern.test('@CXLXAUXDXE hello')).toBe(false);
+  });
+
+  it('supports comma-separated trigger aliases', () => {
+    const pattern = getTriggerPattern('@Bob,@NanoAgent22Bot');
+
+    expect(pattern.test('Bob hello')).toBe(true);
+    expect(pattern.test('@Bob hello')).toBe(true);
+    expect(pattern.test('@NanoAgent22Bot hello')).toBe(true);
+    expect(pattern.test('NanoAgent22Bot hello')).toBe(true);
+    expect(pattern.test('@Andy hello')).toBe(false);
   });
 });
 
