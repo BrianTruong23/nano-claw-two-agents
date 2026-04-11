@@ -72,7 +72,8 @@ function buildVolumeMounts(
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
-  const sharedCommonDir = path.resolve(projectRoot, '..', '..', 'common');
+  // Monorepo: andy/ or bob/ sits next to repo-root common/ (not Documents/common).
+  const sharedCommonDir = path.resolve(projectRoot, '..', 'common');
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(sharedCommonDir, { recursive: true });
 
