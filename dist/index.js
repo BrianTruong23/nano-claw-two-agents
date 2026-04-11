@@ -18,6 +18,7 @@ import { startSessionCleanup } from './session-cleanup.js';
 import { startSchedulerLoop } from './task-scheduler.js';
 import { logger } from './logger.js';
 import { runCodexExec } from './codex-runner.js';
+import { runClaudeExec } from './claude-runner.js';
 import { applySupportedEnvAliases } from './env.js';
 import { startControlPlaneWorker } from './control-plane-worker.js';
 // Re-export for backwards compatibility during refactor
@@ -542,11 +543,11 @@ async function main() {
             logger.warn({ chatJid, sender: msg.sender }, 'Codex command rejected: unregistered chat');
             return;
         }
-        const prompt = command.replace(/^\/(?:codex|claude)\b/i, '').trim();
+        const prompt = command.replace(/^\/codex\b/i, '').trim();
         if (!prompt) {
             const channel = findChannel(channels, chatJid);
             if (channel) {
-                await channel.sendMessage(chatJid, 'Usage: /codex or /claude <coding task>');
+                await channel.sendMessage(chatJid, 'Usage: /codex <coding task>');
             }
             return;
         }
@@ -583,18 +584,96 @@ async function main() {
             await channel.sendMessage(chatJid, `Codex failed: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
+    async function handleClaudeCommand(command, chatJid, msg) {
+        const group = registeredGroups[chatJid];
+        if (!group) {
+            const channel = findChannel(channels, chatJid);
+            if (channel) {
+                await channel.sendMessage(chatJid, 'Claude commands are only enabled in registered chats.');
+            }
+            logger.warn({ chatJid, sender: msg.sender }, 'Claude command rejected: unregistered chat');
+            return;
+        }
+        const prompt = command.replace(/^\/claude\b/i, '').trim();
+        if (!prompt) {
+            const channel = findChannel(channels, chatJid);
+            if (channel) {
+                await channel.sendMessage(chatJid, 'Usage: /claude <coding task>');
+            }
+            return;
+        }
+        const channel = findChannel(channels, chatJid);
+        if (!channel)
+            return;
+        await channel.sendMessage(chatJid, 'Starting Claude coding agent…');
+        try {
+            await channel.setTyping?.(chatJid, true);
+        }
+        catch (e) { }
+        try {
+            const workspaceDir = path.resolve(process.cwd(), '../../workspace');
+            if (!fs.existsSync(workspaceDir)) {
+                fs.mkdirSync(workspaceDir, { recursive: true });
+            }
+            const result = await runClaudeExec(prompt, workspaceDir);
+            try {
+                await channel.setTyping?.(chatJid, false);
+            }
+            catch (e) { }
+            if (result.ok) {
+                await channel.sendMessage(chatJid, result.text || 'Claude completed.');
+            }
+            else {
+                await channel.sendMessage(chatJid, `Claude failed: ${result.error || 'unknown error'}`);
+            }
+        }
+        catch (err) {
+            try {
+                await channel.setTyping?.(chatJid, false);
+            }
+            catch (e) { }
+            await channel.sendMessage(chatJid, `Claude failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
     function extractCodexPrompt(text) {
         const trimmed = text.trim();
-        if (/^\/(?:codex|claude)\b/i.test(trimmed)) {
+        if (/^\/codex\b/i.test(trimmed)) {
             const prompt = trimmed.replace(/^\/(?:codex|claude)\b[:\s-]*/i, '').trim();
             return prompt || null;
         }
         const naturalLanguagePatterns = [
-            /^use (?:codex|claude) (?:to |for )?(.*)$/i,
-            /^spawn (?:codex|claude) (?:to |for )?(.*)$/i,
-            /^have (?:codex|claude) (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
-            /^ask (?:codex|claude) (?:to )?(.*)$/i,
-            /^(?:codex|claude)[:,]?\s*(.*)$/i,
+            /^use codex (?:to |for )?(.*)$/i,
+            /^spawn codex (?:to |for )?(.*)$/i,
+            /^have codex (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+            /^ask codex (?:to )?(.*)$/i,
+            /^codex[:,]?\s*(.*)$/i,
+            /^use (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
+            /^spawn (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
+            /^have (?:the )?(?:coding|code) agent (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+            /^ask (?:the )?(?:coding|code) agent (?:to )?(.*)$/i,
+            /^(?:coding|code) agent[:,]?\s*(.*)$/i,
+            /^(commit .* and push(?: .*github)?|push .* to github|push to github)$/i,
+        ];
+        for (const pattern of naturalLanguagePatterns) {
+            const match = trimmed.match(pattern);
+            const prompt = match?.[1]?.trim();
+            if (prompt)
+                return prompt;
+        }
+        return null;
+    }
+    function extractClaudePrompt(text) {
+        const trimmed = text.trim();
+        if (/^\/claude\b/i.test(trimmed)) {
+            const prompt = trimmed.replace(/^\/(?:claude|claude)\b[:\s-]*/i, '').trim();
+            return prompt || null;
+        }
+        const naturalLanguagePatterns = [
+            /^use claude (?:to |for )?(.*)$/i,
+            /^spawn claude (?:to |for )?(.*)$/i,
+            /^have claude (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
+            /^ask claude (?:to )?(.*)$/i,
+            /^claude[:,]?\s*(.*)$/i,
             /^use (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
             /^spawn (?:the )?(?:coding|code) agent (?:to |for )?(.*)$/i,
             /^have (?:the )?(?:coding|code) agent (?:handle|do|fix|work on|look at|review)\s+(.*)$/i,
@@ -629,6 +708,19 @@ async function main() {
                 const shouldHandleCodex = group?.isMain || addressesMe || (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
                 if (shouldHandleCodex) {
                     handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch((err) => logger.error({ err, chatJid }, 'Codex command error'));
+                }
+                return;
+            }
+            const claudePrompt = extractClaudePrompt(trimmed);
+            if (claudePrompt) {
+                const group = registeredGroups[chatJid];
+                const myPattern = group ? getTriggerPattern(group.trigger) : null;
+                const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
+                const addressesMe = !!myPattern?.test(trimmed);
+                const addressesOther = otherPatterns.some((p) => p.test(trimmed));
+                const shouldHandleClaude = group?.isMain || addressesMe || (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
+                if (shouldHandleClaude) {
+                    handleClaudeCommand(`/claude ${claudePrompt}`, chatJid, msg).catch((err) => logger.error({ err, chatJid }, 'Claude command error'));
                 }
                 return;
             }

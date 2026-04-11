@@ -1,10 +1,10 @@
 {
   "role": "agent",
-  "pid": 51855,
+  "pid": 54132,
   "status": "running",
-  "startedAt": "2026-04-11T02:55:01.695Z",
-  "updatedAt": "2026-04-11T02:55:41.602Z",
-  "heartbeatAt": "2026-04-11T02:55:41.602Z",
+  "startedAt": "2026-04-11T02:57:10.608Z",
+  "updatedAt": "2026-04-11T03:05:37.014Z",
+  "heartbeatAt": "2026-04-11T03:05:37.014Z",
   "defaultTrigger": "@Bob",
   "channels": [
     {
@@ -13,8 +13,20 @@
     }
   ],
   "queue": {
-    "activeCount": 0,
+    "activeCount": 1,
     "waitingGroups": [],
-    "groups": {}
+    "groups": {
+      "tg:-5122778581": {
+        "active": true,
+        "idleWaiting": true,
+        "isTaskContainer": false,
+        "runningTaskId": null,
+        "pendingMessages": false,
+        "pendingTaskCount": 0,
+        "containerName": "nanoclaw-telegram-group-1775876708851",
+        "groupFolder": "telegram_group",
+        "retryCount": 0
+      }
+    }
   }
 }
