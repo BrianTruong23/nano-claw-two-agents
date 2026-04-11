@@ -6,6 +6,37 @@ LOG_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$SCRIPT_DIR/.agents.pid"
 mkdir -p "$LOG_DIR"
 
+# Only trim logs at least this many bytes (avoids rewriting tiny files).
+MIN_LOG_TRIM_BYTES="${MIN_LOG_TRIM_BYTES:-65536}"
+
+# Remove the oldest ~50% of each *.log (by bytes), keep the newest half.
+trim_orchestration_logs_oldest_half() {
+  shopt -s nullglob
+  local f size half tmp newsize
+  for f in "$LOG_DIR"/*.log; do
+    [[ -f "$f" ]] || continue
+    size=$(wc -c <"$f" | awk '{print $1}')
+    if ! [[ "$size" =~ ^[0-9]+$ ]] || ((size < MIN_LOG_TRIM_BYTES)); then
+      continue
+    fi
+    half=$((size / 2))
+    ((half < 1)) && continue
+    tmp="${f}.tmp.$$"
+    if tail -c +$((half + 1)) "$f" >"$tmp" 2>/dev/null; then
+      newsize=$(wc -c <"$tmp" | awk '{print $1}')
+      if [[ "$newsize" =~ ^[0-9]+$ ]] && ((newsize > 0)); then
+        mv "$tmp" "$f"
+        echo "Trimmed oldest ~50% of $(basename "$f") (was ${size} bytes → ${newsize} bytes)"
+      else
+        rm -f "$tmp"
+      fi
+    else
+      rm -f "$tmp"
+    fi
+  done
+  shopt -u nullglob
+}
+
 # ── logs-clean ───────────────────────────────────────────────────────────────
 # Truncate orchestration logs (andy/bob/bridge) so they do not grow without bound.
 # Stop agents first so new log files are used cleanly after restart.
@@ -60,6 +91,8 @@ if [[ "${1:-}" == "stop" ]]; then
   fi
   pkill -f "nano-claw-agents/.*/dist/index.js" 2>/dev/null || true
   pkill -f "bot-bridge.sh" 2>/dev/null || true
+  echo "Trimming large logs (dropping oldest ~50% per file)…"
+  trim_orchestration_logs_oldest_half || true
   exit 0
 fi
 
@@ -76,6 +109,8 @@ fi
 pkill -f "nano-claw-agents/.*/dist/index.js" 2>/dev/null || true
 pkill -f "bot-bridge.sh" 2>/dev/null || true
 sleep 1
+echo "Trimming large logs (dropping oldest ~50% per file)…"
+trim_orchestration_logs_oldest_half || true
 
 # NanoClaw reads `.env` from each agent directory (cwd). Seed from repo-root templates if missing.
 sync_agent_env() {

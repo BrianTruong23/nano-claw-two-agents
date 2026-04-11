@@ -33,15 +33,15 @@ Commit only intentional source, scripts, and docs.
 
 ## Log rotation (repo root)
 
-Orchestration logs live under `logs/*.log`. When they grow large:
+Orchestration logs live under `logs/*.log`.
+
+- **Automatic (half-trim):** `./start.sh stop` and the stale-cleanup path inside `./start.sh` drop the **oldest ~50%** of each log file **by bytes** (files smaller than `MIN_LOG_TRIM_BYTES`, default `65536`, are left unchanged).
+- **Full clear:** `./start.sh logs-clean` (stop agents first, or use `--force`).
 
 ```bash
-./start.sh stop
-./start.sh logs-clean
-./start.sh
+./start.sh stop   # trims large logs then exits
+./start.sh        # also trims after killing stale processes, then starts agents
 ```
-
-`logs-clean` refuses to run while agent PIDs are still alive (unless `./start.sh logs-clean --force`).
 
 ## After code changes — run these automatically
 

@@ -16,7 +16,7 @@ It aims to seamlessly bridge the gap between distinct agent runtimes, allowing f
 * `andy/` — NanoClaw instance for the "Andy" agent (`npm run build` / `node dist/index.js` from this directory).
 * `bob/` — NanoClaw instance for "Bob", same layout as `andy/`.
 * `common/` — Repo-local shared directory (`nano-claw-agents/common/`) bind-mounted as `/workspace/common` in both agent containers. (Paths are resolved from `andy/` / `bob/` as one level up, not under `Documents/common`.)
-* `start.sh` — Orchestrates agents and the bot bridge. Use `./start.sh stop` before `./start.sh logs-clean` to truncate `logs/*.log` when files grow too large.
+* `start.sh` — Orchestrates agents and the bot bridge. On each **stop** (or before a fresh **start** after killing stale PIDs), logs in `logs/*.log` that exceed **64KiB** are trimmed by removing the **oldest ~50%** of bytes (newest half kept). Use `./start.sh logs-clean` for a **full** truncate when you want empty logs. Override the threshold with `MIN_LOG_TRIM_BYTES`.
 
 ## 🛠 Active Tool Capabilities
 
