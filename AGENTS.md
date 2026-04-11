@@ -31,6 +31,18 @@ Never stage or commit local runtime state unless the user explicitly asks:
 
 Commit only intentional source, scripts, and docs.
 
+## Log rotation (repo root)
+
+Orchestration logs live under `logs/*.log`. When they grow large:
+
+```bash
+./start.sh stop
+./start.sh logs-clean
+./start.sh
+```
+
+`logs-clean` refuses to run while agent PIDs are still alive (unless `./start.sh logs-clean --force`).
+
 ## After code changes — run these automatically
 
 Run from the **repository root** (`nano-claw-agents`). Ensure meaningful changes are **committed on `main`** before splitting (subtree split uses commit history, not unstaged files).

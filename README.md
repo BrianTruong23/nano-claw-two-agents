@@ -16,7 +16,7 @@ It aims to seamlessly bridge the gap between distinct agent runtimes, allowing f
 * `andy/` — NanoClaw instance for the "Andy" agent (`npm run build` / `node dist/index.js` from this directory).
 * `bob/` — NanoClaw instance for "Bob", same layout as `andy/`.
 * `common/` — Repo-local shared directory (`nano-claw-agents/common/`) bind-mounted as `/workspace/common` in both agent containers. (Paths are resolved from `andy/` / `bob/` as one level up, not under `Documents/common`.)
-* `start.sh` — The orchestration shell script responsible for spinning up the local environment daemons and bridging IPC communications across the platform.
+* `start.sh` — Orchestrates agents and the bot bridge. Use `./start.sh stop` before `./start.sh logs-clean` to truncate `logs/*.log` when files grow too large.
 
 ## 🛠 Active Tool Capabilities
 

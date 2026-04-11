@@ -6,6 +6,46 @@ LOG_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$SCRIPT_DIR/.agents.pid"
 mkdir -p "$LOG_DIR"
 
+# ── logs-clean ───────────────────────────────────────────────────────────────
+# Truncate orchestration logs (andy/bob/bridge) so they do not grow without bound.
+# Stop agents first so new log files are used cleanly after restart.
+if [[ "${1:-}" == "logs-clean" ]]; then
+  force=false
+  [[ "${2:-}" == "--force" ]] && force=true
+
+  if [[ -f "$PID_FILE" ]] && [[ "$force" != "true" ]]; then
+    alive=()
+    while IFS= read -r pid; do
+      [[ -z "$pid" ]] && continue
+      if kill -0 "$pid" 2>/dev/null; then
+        alive+=("$pid")
+      fi
+    done < "$PID_FILE"
+    if ((${#alive[@]} > 0)); then
+      echo "Agents still running (PIDs: ${alive[*]})." >&2
+      echo "Stop them first:  ./start.sh stop" >&2
+      echo "Then clear logs:   ./start.sh logs-clean" >&2
+      echo "Or truncate anyway (same open files keep writing until restart): ./start.sh logs-clean --force" >&2
+      exit 1
+    fi
+    rm -f "$PID_FILE"
+  fi
+
+  shopt -s nullglob
+  cleared=0
+  for f in "$LOG_DIR"/*.log; do
+    : >"$f"
+    echo "Cleared $f"
+    cleared=$((cleared + 1))
+  done
+  shopt -u nullglob
+  if ((cleared == 0)); then
+    echo "No *.log files in $LOG_DIR"
+  fi
+  echo "Done."
+  exit 0
+fi
+
 # ── stop command ──────────────────────────────────────────────────────────────
 if [[ "${1:-}" == "stop" ]]; then
   if [[ -f "$PID_FILE" ]]; then
@@ -102,3 +142,4 @@ echo "  Bridge   : $BRIDGE_PID"
 echo ""
 echo "Logs : $LOG_DIR/andy.log | $LOG_DIR/bob.log | $LOG_DIR/bridge.log"
 echo "Stop : ./start.sh stop"
+echo "Clear logs (after stop): ./start.sh logs-clean"
