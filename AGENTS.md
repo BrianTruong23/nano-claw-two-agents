@@ -86,3 +86,7 @@ Adjust `nanoclaw` URL or push targets when the user names different GitHub repos
 
 - Big repo: `https://github.com/BrianTruong23/nano-claw-two-agents`
 - Nanoclaw fork (branches `andy`, `bob`): `https://github.com/BrianTruong23/nanoclaw`
+
+## Git clone into `/workspace/common`
+
+See [`docs/git-clone-into-common.md`](docs/git-clone-into-common.md) for agent-runner behavior (`workspace-git-clone`), rebuild steps, and a brainstorm of further reliability options.

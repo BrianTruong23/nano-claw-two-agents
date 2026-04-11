@@ -13,6 +13,9 @@ Use this skill when the user asks to check repository state, inspect remotes, co
 ```bash
 github status
 github whoami
+workspace-git-clone <repository_url>
+workspace-git-clone <repository_url> <folder_name>
+git clone <repository_url> /workspace/common/<folder_name>
 git clone <repository_url>
 git status --short --branch
 git remote -v
@@ -28,6 +31,16 @@ git revert <commit_hash>
 github push
 github push <branch>
 ```
+
+## Cloning into the shared Andy/Bob folder (`/workspace/common`)
+
+- **Preferred:** emit a single line the runner will execute, e.g.  
+  `workspace-git-clone https://github.com/org/repo.git`  
+  (clone is created **inside** `/workspace/common` with default directory name from the repo).
+- **Optional folder name:** `workspace-git-clone https://github.com/org/repo.git my-folder`
+- **Alternative:** `git clone <url> /workspace/common/<folder>` — plain `git clone <url>` alone uses **`/workspace/project`** as cwd, **not** common.
+
+After cloning, verify with: `workspace-list /workspace/common` (or list the target path).
 
 ## Workflow
 

@@ -22,6 +22,14 @@ This maps to the host folder (sibling of `andy/` and `bob/` in this repo):
 <repository-root>/common
 ```
 
+To **clone a Git repo into shared space**, use a line the agent-runner will execute (not prose only):
+
+```text
+workspace-git-clone https://github.com/org/repo.git
+```
+
+Optional target directory name: `workspace-git-clone <url> my-dir`. Do not rely on bare `git clone <url>` for common — that defaults to the project mount cwd.
+
 ## Chat-Specific Space
 
 Files only relevant to the current chat can go in:

@@ -67,7 +67,8 @@ const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const SCRIPT_TIMEOUT_MS = 30_000;
 const TOOL_TIMEOUT_MS = 30_000;
-const MAX_TOOL_ITERATIONS = 4;
+/** Max (model reply → execute parsed tools) cycles before forcing a plain-language wrap-up. */
+const MAX_TOOL_ROUNDS = 8;
 const MAX_TOOL_COMMANDS_PER_TURN = 4;
 const GROUP_DIR = '/workspace/group';
 const GLOBAL_DIR = '/workspace/global';
@@ -191,9 +192,12 @@ function buildSystemPrompt(containerInput: ContainerInput): string {
     `You are ${containerInput.assistantName || 'Andy'}, the NanoClaw assistant replying inside a chat.`,
     'Be concise, direct, and helpful.',
     'If the user asks for code or debugging help, focus on actionable technical guidance.',
-    'Do not claim to have completed actions you did not actually complete.',
-    'Executable commands available in this runtime: agent-browser, github, safe git commands, workspace-list, workspace-read, workspace-write.',
-    'For files that should be visible to both Andy and Bob, use /workspace/common. For chat-specific notes, use /workspace/group.',
+    'Do not claim to have completed actions you did not actually complete. If a tool failed, say so and quote stderr from the tool results.',
+    'Tools only run when you emit a whole line or single-backtick line starting with an allowed command (see below). Prose alone does not run anything.',
+    'Executable commands: agent-browser, github, safe git commands, workspace-git-clone, workspace-list, workspace-read, workspace-write, workspace-delete, workspace-rename, workspace-mkdir, workspace-copy, workspace-download, touch.',
+    'Shared Andy/Bob files live under /workspace/common. Prefer `workspace-git-clone <url>` or `workspace-git-clone <url> <folder_name>` so the clone runs with cwd=/workspace/common (no path mistakes).',
+    'Plain `git clone <url>` runs with cwd=/workspace/project (NanoClaw app tree), not common — only use it when you mean the project mount, or pass an explicit destination: `git clone <url> /workspace/common/<dir>`.',
+    'For chat-specific notes, use /workspace/group.',
   ];
 
   const groupMemory = readOptionalFile(path.join(GROUP_DIR, 'CLAUDE.md'));
@@ -508,7 +512,7 @@ function isAllowedGitCommand(args: string[]): boolean {
 }
 
 function isToolCommand(command: string): boolean {
-  return /^(agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download)\b/.test(command.trim());
+  return /^(agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download|workspace-git-clone)\b/.test(command.trim());
 }
 
 function extractToolCommands(reply: string): string[] {
@@ -528,6 +532,9 @@ function extractToolCommands(reply: string): string[] {
     }
     if (executable === 'git') return isAllowedGitCommand(args);
     if (executable === 'github') return args.length >= 1;
+    if (executable === 'workspace-git-clone') {
+      return Boolean(args[0] && args[0] !== '...');
+    }
     return executable === 'agent-browser' || executable === 'workspace-list';
   };
   const add = (raw: string) => {
@@ -539,7 +546,9 @@ function extractToolCommands(reply: string): string[] {
     commands.push(command);
   };
 
-  for (const match of reply.matchAll(/`((?:agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download)(?:\s+[^`]+)?)`/g)) {
+  for (const match of reply.matchAll(
+    /`((?:agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download|workspace-git-clone)(?:\s+[^`]+)?)`/g,
+  )) {
     add(match[1] || '');
   }
 
@@ -751,12 +760,30 @@ async function runWorkspaceCommand(command: string, args: string[]): Promise<str
   return `Unsupported workspace command: ${command}`;
 }
 
+async function runWorkspaceGitClone(args: string[]): Promise<string> {
+  const url = args[0];
+  if (!url) return 'Usage: workspace-git-clone <git_repo_url> [directory_name]';
+  ensureDir(COMMON_DIR);
+  const cloneArgs: string[] = ['clone', url];
+  if (args[1] && args[1] !== '...') {
+    cloneArgs.push(args[1]);
+  }
+  return execCommand('git', cloneArgs, {
+    cwd: COMMON_DIR,
+    env: gitEnv(),
+    timeoutMs: 120_000,
+  });
+}
+
 async function runToolCommand(command: string): Promise<string> {
   const parts = shellSplit(command);
   const executable = parts[0];
   const args = parts.slice(1);
   if (executable === 'agent-browser') {
     return execCommand('agent-browser', normalizeAgentBrowserArgs(args));
+  }
+  if (executable === 'workspace-git-clone') {
+    return runWorkspaceGitClone(args);
   }
   if (executable === 'git') {
     if (!isAllowedGitCommand(args)) {
@@ -768,7 +795,17 @@ async function runToolCommand(command: string): Promise<string> {
   if (executable === 'github') {
     return runGithubPseudoCommand(args);
   }
-  if (executable === 'touch' || executable === 'workspace-list' || executable === 'workspace-read' || executable === 'workspace-write' || executable === 'workspace-delete' || executable === 'workspace-rename' || executable === 'workspace-mkdir' || executable === 'workspace-copy' || executable === 'workspace-download') {
+  if (
+    executable === 'touch' ||
+    executable === 'workspace-list' ||
+    executable === 'workspace-read' ||
+    executable === 'workspace-write' ||
+    executable === 'workspace-delete' ||
+    executable === 'workspace-rename' ||
+    executable === 'workspace-mkdir' ||
+    executable === 'workspace-copy' ||
+    executable === 'workspace-download'
+  ) {
     return runWorkspaceCommand(executable, args);
   }
   return `Skipped unsupported command: ${command}`;
@@ -791,23 +828,38 @@ async function runTurn(
 ): Promise<string> {
   session.messages.push({ role: 'user', content: prompt });
 
-  let reply = '';
-  for (let iteration = 0; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
-    reply = await queryOpenRouter(session, containerInput);
+  let reply = await queryOpenRouter(session, containerInput);
+  let toolRounds = 0;
+
+  while (true) {
     const commands = extractToolCommands(reply);
-    if (commands.length === 0 || iteration === MAX_TOOL_ITERATIONS) {
+    if (commands.length === 0) {
       session.messages.push({ role: 'assistant', content: reply });
       break;
     }
 
     session.messages.push({ role: 'assistant', content: reply });
     const toolResults = await runToolCommands(commands);
-    session.messages.push({
-      role: 'user',
-      content:
-        `[Tool results from executed commands]\n\n${toolResults}\n\n` +
-        'Use these results to answer the user directly. Do not print tool commands unless you still need another tool action.',
-    });
+    toolRounds += 1;
+
+    const baseFollowup =
+      `[Tool results from executed commands]\n\n${toolResults}\n\n` +
+      'Use these results to answer the user directly. If clone or another command failed, say so and quote stderr. Do not claim success unless tool output confirms it. Do not print tool commands unless another action is still required.';
+
+    if (toolRounds >= MAX_TOOL_ROUNDS) {
+      session.messages.push({
+        role: 'user',
+        content:
+          `${baseFollowup}\n\n` +
+          '[System: tool round limit reached. Reply in plain language only summarizing what succeeded or failed above. Do not emit further git, workspace-git-clone, or workspace-* command lines.]',
+      });
+      reply = await queryOpenRouter(session, containerInput);
+      session.messages.push({ role: 'assistant', content: reply });
+      break;
+    }
+
+    session.messages.push({ role: 'user', content: baseFollowup });
+    reply = await queryOpenRouter(session, containerInput);
   }
 
   saveSession(session);
