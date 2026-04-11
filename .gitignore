@@ -6,9 +6,6 @@ logs/
 
 # Environment Variables
 .env
-.env_andy
-.env_bob
-
 */.env
 */*/.env
 
@@ -25,10 +22,6 @@ yarn-error.log*
 Thumbs.db
 *.swp
 
-# Runtime Files
-*.pid
-.agents.pid
-
 # SQLite Databases
 *.db
 *.sqlite
@@ -36,5 +29,3 @@ Thumbs.db
 
 # Shared Code Workspace
 workspace/
-
-.gitignore
