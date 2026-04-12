@@ -224,6 +224,7 @@ function buildVolumeMounts(group, isMain) {
         const validatedMounts = validateAdditionalMounts(group.containerConfig.additionalMounts, group.name, isMain);
         mounts.push(...validatedMounts);
     }
+    prepareManagedWritableMounts(mounts, [projectRoot, sharedCommonDir]);
     return mounts;
 }
 async function buildContainerArgs(mounts, containerName, agentIdentifier) {

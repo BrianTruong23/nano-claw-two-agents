@@ -315,6 +315,8 @@ function buildVolumeMounts(
     mounts.push(...validatedMounts);
   }
 
+  prepareManagedWritableMounts(mounts, [projectRoot, sharedCommonDir]);
+
   return mounts;
 }
 

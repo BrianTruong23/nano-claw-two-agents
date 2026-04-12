@@ -11,6 +11,11 @@ It aims to seamlessly bridge the gap between distinct agent runtimes, allowing f
 * **Containerized Security:** The engine securely boots ephemeral container shells per request. Agents safely operate inside restricted bounds while natively leveraging expanded tooling like headless web scraping (powered by Brave Search), deep OS file manipulation infrastructure, and advanced Git workflow orchestration (`clone`, `checkout`, `stash`, `merge`).
 * **Twin NanoClaw roots:** `andy/` and `bob/` each hold a full NanoClaw tree (separate processes, SQLite stores, and `.env`). You can still sync either side from upstream NanoClaw using git subtree or a manual merge workflow when you want updates.
 
+## Branch policy (`main` vs `vm_machine`)
+
+* **`main`** carries **all product features**: agent behavior, research / verify / collaborate routing (`research-mode.ts` and related), collaboration between Andy and Bob, channel changes, and anything you want every developer to run on a Mac or Linux workstation.
+* **`vm_machine`** is **only for Linux server / VM deployment**: first-boot conveniences (for example `start.sh` running `npm ci` when `node_modules` is missing or native modules fail to load), small ops-only tweaks, and notes or scripts that exist purely because the app runs headless on a VM. **Do not land new product features only on `vm_machine`.** Merge `main` into `vm_machine` regularly; avoid merging `vm_machine` into `main` except to bring over intentional deploy-helper changes.
+
 ## 📂 Repository Structure
 
 * `andy/` — NanoClaw instance for the "Andy" agent (`npm run build` / `node dist/index.js` from this directory).
