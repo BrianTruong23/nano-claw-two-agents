@@ -179,20 +179,32 @@ ensure_agent_build() {
 ensure_agent_build "$SCRIPT_DIR/andy"
 ensure_agent_build "$SCRIPT_DIR/bob"
 
+# setsid(1) is common on Linux for a clean new session; macOS does not ship it.
+# Without a fallback, nohup fails immediately and agents never stay up.
+launch_background() {
+  local log_file="$1"
+  shift
+  if command -v setsid >/dev/null 2>&1; then
+    nohup setsid "$@" >>"$log_file" 2>&1 &
+  else
+    nohup "$@" >>"$log_file" 2>&1 &
+  fi
+}
+
 echo "Starting Andy..."
-nohup setsid bash -c "cd '$SCRIPT_DIR/andy' && exec node dist/index.js" >> "$LOG_DIR/andy.log" 2>&1 &
+launch_background "$LOG_DIR/andy.log" bash -c "cd '$SCRIPT_DIR/andy' && exec node dist/index.js"
 ANDY_PID=$!
 
 echo "Starting Bob..."
-nohup setsid bash -c "cd '$SCRIPT_DIR/bob' && exec node dist/index.js" >> "$LOG_DIR/bob.log" 2>&1 &
+launch_background "$LOG_DIR/bob.log" bash -c "cd '$SCRIPT_DIR/bob' && exec node dist/index.js"
 BOB_PID=$!
 
 echo "Starting bot-bridge..."
-nohup setsid bash "$SCRIPT_DIR/bot-bridge.sh" >> "$LOG_DIR/bridge.log" 2>&1 &
+launch_background "$LOG_DIR/bridge.log" bash "$SCRIPT_DIR/bot-bridge.sh"
 BRIDGE_PID=$!
 
 echo "Starting log trimmer..."
-nohup setsid bash "$SCRIPT_DIR/start.sh" log-trimmer-loop >> "$LOG_DIR/log-trimmer.log" 2>&1 &
+launch_background "$LOG_DIR/log-trimmer.log" bash "$SCRIPT_DIR/start.sh" log-trimmer-loop
 TRIMMER_PID=$!
 
 # Save PIDs
