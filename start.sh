@@ -163,19 +163,19 @@ ensure_agent_build "$SCRIPT_DIR/andy"
 ensure_agent_build "$SCRIPT_DIR/bob"
 
 echo "Starting Andy..."
-nohup bash -c "cd '$SCRIPT_DIR/andy' && exec node dist/index.js" >> "$LOG_DIR/andy.log" 2>&1 &
+nohup setsid bash -c "cd '$SCRIPT_DIR/andy' && exec node dist/index.js" >> "$LOG_DIR/andy.log" 2>&1 &
 ANDY_PID=$!
 
 echo "Starting Bob..."
-nohup bash -c "cd '$SCRIPT_DIR/bob' && exec node dist/index.js" >> "$LOG_DIR/bob.log" 2>&1 &
+nohup setsid bash -c "cd '$SCRIPT_DIR/bob' && exec node dist/index.js" >> "$LOG_DIR/bob.log" 2>&1 &
 BOB_PID=$!
 
 echo "Starting bot-bridge..."
-nohup bash "$SCRIPT_DIR/bot-bridge.sh" >> "$LOG_DIR/bridge.log" 2>&1 &
+nohup setsid bash "$SCRIPT_DIR/bot-bridge.sh" >> "$LOG_DIR/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 
 echo "Starting log trimmer..."
-nohup bash "$SCRIPT_DIR/start.sh" log-trimmer-loop >> "$LOG_DIR/log-trimmer.log" 2>&1 &
+nohup setsid bash "$SCRIPT_DIR/start.sh" log-trimmer-loop >> "$LOG_DIR/log-trimmer.log" 2>&1 &
 TRIMMER_PID=$!
 
 # Save PIDs
