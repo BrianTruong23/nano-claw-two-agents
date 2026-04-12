@@ -325,9 +325,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (addressesOther && !addressesMe) return true;
   }
 
-  const modeDecision = newestHumanMsg
-    ? classifyResearchMode(newestHumanMsg.content)
-    : null;
+  // Research modes apply only to isResearchGroup chats, not private DMs.
+  const modeDecision =
+    newestHumanMsg && isResearchGroup(group)
+      ? classifyResearchMode(newestHumanMsg.content)
+      : null;
   if (
     modeDecision &&
     !shouldAgentRunForResearchMode(modeDecision.mode, WAIT_FOR_BOT_RESPONSE)
@@ -671,9 +673,10 @@ async function startMessageLoop(): Promise<void> {
           const newestHumanMsg = [...groupMessages]
             .reverse()
             .find((m) => !m.is_from_me && !m.is_bot_message);
-          const modeDecision = newestHumanMsg
-            ? classifyResearchMode(newestHumanMsg.content)
-            : null;
+          const modeDecision =
+            newestHumanMsg && isResearchGroup(group)
+              ? classifyResearchMode(newestHumanMsg.content)
+              : null;
           if (
             modeDecision &&
             !shouldAgentRunForResearchMode(
