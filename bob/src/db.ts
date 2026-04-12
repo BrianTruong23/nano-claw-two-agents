@@ -221,6 +221,14 @@ export function storeChatMetadata(
   }
 }
 
+/** True when chat metadata marks this JID as a multi-user group (not a 1:1 DM). */
+export function isGroupChat(chatJid: string): boolean {
+  const row = db
+    .prepare('SELECT is_group FROM chats WHERE jid = ?')
+    .get(chatJid) as { is_group: number | null } | undefined;
+  return row !== undefined && row.is_group === 1;
+}
+
 /**
  * Update chat name without changing timestamp for existing chats.
  * New chats get the current time as their initial timestamp.

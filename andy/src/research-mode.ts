@@ -1,3 +1,14 @@
+/**
+ * Research-style routing (used only in multi-user group chats, not DMs):
+ *
+ * 1. **Slash commands** (regex on the trimmed message start): `/andy`, `/verify`,
+ *    `/collaborate` (also `/col`, `/collab`).
+ * 2. Else **verify heuristics**: fixed English regexes (e.g. “verify”, “fact-check”, …).
+ * 3. Else **collaborate heuristics**: fixed English regexes OR message length ≥ 220.
+ * 4. Else default **`andy`** mode (primary-only classification for that turn).
+ *
+ * This is intentionally lightweight pattern matching, not an LLM classifier.
+ */
 export type ResearchMode = 'andy' | 'verify' | 'collaborate';
 
 export type ResearchModeSource = 'command' | 'classifier';

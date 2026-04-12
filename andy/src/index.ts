@@ -49,6 +49,7 @@ import {
   getNewMessages,
   getRouterState,
   hasCrossBotResponse,
+  isGroupChat,
   initDatabase,
   setRegisteredGroup,
   setRouterState,
@@ -184,16 +185,12 @@ function retryMessageCheckSoon(chatJid: string): void {
   }, 2000);
 }
 
-function isResearchGroup(group: RegisteredGroup): boolean {
-  return /research/i.test(`${group.name} ${group.folder}`);
-}
-
 function canMessageStartResearchMode(
   message: NewMessage,
-  group: RegisteredGroup,
+  _group: RegisteredGroup,
   chatJid: string,
 ): boolean {
-  if (!isResearchGroup(group)) return false;
+  if (!isGroupChat(chatJid)) return false;
   if (message.is_bot_message) return false;
   if (message.is_from_me) return true;
   return isTriggerAllowed(chatJid, message.sender, loadSenderAllowlist());
@@ -325,9 +322,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (addressesOther && !addressesMe) return true;
   }
 
-  // Research modes apply only to isResearchGroup chats, not private DMs.
+  // Research modes apply only to multi-user groups (chats.is_group = 1), not DMs.
   const modeDecision =
-    newestHumanMsg && isResearchGroup(group)
+    newestHumanMsg && isGroupChat(chatJid)
       ? classifyResearchMode(newestHumanMsg.content)
       : null;
   if (
@@ -674,7 +671,7 @@ async function startMessageLoop(): Promise<void> {
             .reverse()
             .find((m) => !m.is_from_me && !m.is_bot_message);
           const modeDecision =
-            newestHumanMsg && isResearchGroup(group)
+            newestHumanMsg && isGroupChat(chatJid)
               ? classifyResearchMode(newestHumanMsg.content)
               : null;
           if (
