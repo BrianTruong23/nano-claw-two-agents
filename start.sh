@@ -144,11 +144,28 @@ sync_agent_env() {
 sync_agent_env "$SCRIPT_DIR/andy" "$SCRIPT_DIR/.env_andy"
 sync_agent_env "$SCRIPT_DIR/bob" "$SCRIPT_DIR/.env_bob"
 
+ensure_agent_dependencies() {
+  local root="$1"
+  local name
+  name="$(basename "$root")"
+  if [[ ! -x "$root/node_modules/.bin/tsc" ]] || [[ ! -d "$root/node_modules/@onecli-sh/sdk" ]] || [[ ! -d "$root/node_modules/better-sqlite3" ]]; then
+    echo "Installing $name dependencies (node_modules missing or incomplete)..."
+    (cd "$root" && npm ci)
+  fi
+  if (cd "$root" && node -e "require('esbuild'); const Database = require('better-sqlite3'); new Database(':memory:').close();") >/dev/null 2>&1; then
+    return
+  fi
+  echo "Reinstalling $name dependencies (native package failed to load on this platform)..."
+  (cd "$root" && npm ci)
+  (cd "$root" && node -e "require('esbuild'); const Database = require('better-sqlite3'); new Database(':memory:').close();") >/dev/null
+}
+
 # Rebuild when dist is missing, incomplete, or older than any src/*.ts (avoids ERR_MODULE_NOT_FOUND after pulls).
 ensure_agent_build() {
   local root="$1"
   local name
   name="$(basename "$root")"
+  ensure_agent_dependencies "$root"
   if [[ ! -f "$root/dist/index.js" ]] || [[ ! -f "$root/dist/claude-runner.js" ]]; then
     echo "Building $name (dist missing or incomplete)..."
     (cd "$root" && npm run build)
