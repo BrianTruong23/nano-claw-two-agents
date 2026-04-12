@@ -71,6 +71,15 @@ describe('env aliases', () => {
         expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe('openrouter-key');
         expect(process.env.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api/v1/anthropic');
     });
+    it('ignores placeholder process env values and uses real .env aliases', () => {
+        writeTempEnv('OPEN-REUTER=sk-or-real-openrouter-key\n');
+        process.env.OPENROUTER_API_KEY = 'YOUR_OPENROUTER_API_KEY';
+        process.env.ANTHROPIC_AUTH_TOKEN = 'YOUR_OPENROUTER_API_KEY';
+        delete process.env.ANTHROPIC_BASE_URL;
+        applySupportedEnvAliases();
+        expect(process.env.ANTHROPIC_AUTH_TOKEN).toBe('sk-or-real-openrouter-key');
+        expect(process.env.ANTHROPIC_BASE_URL).toBe('https://openrouter.ai/api/v1/anthropic');
+    });
     it('maps GitHub token aliases into standard env vars', () => {
         writeTempEnv('GITHUB-TOKEN=github-token\n');
         delete process.env.GITHUB_TOKEN;

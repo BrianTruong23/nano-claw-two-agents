@@ -45,16 +45,20 @@ export function readEnvFile(keys: string[]): Record<string, string> {
 export function readEnvValue(keys: string[]): string | undefined {
   for (const key of keys) {
     const value = process.env[key];
-    if (value) return value;
+    if (value && !isPlaceholderEnvValue(value)) return value;
   }
 
   const envValues = readEnvFile(keys);
   for (const key of keys) {
     const value = envValues[key];
-    if (value) return value;
+    if (value && !isPlaceholderEnvValue(value)) return value;
   }
 
   return undefined;
+}
+
+function isPlaceholderEnvValue(value: string): boolean {
+  return /^YOUR[_-]/i.test(value.trim());
 }
 
 /**
@@ -78,7 +82,10 @@ export function applySupportedEnvAliases(): void {
     'OPENROUTER_API_KEY',
   ]);
   if (openRouterApiKey) {
-    if (!process.env.ANTHROPIC_AUTH_TOKEN) {
+    if (
+      !process.env.ANTHROPIC_AUTH_TOKEN ||
+      isPlaceholderEnvValue(process.env.ANTHROPIC_AUTH_TOKEN)
+    ) {
       process.env.ANTHROPIC_AUTH_TOKEN = openRouterApiKey;
     }
     if (!process.env.ANTHROPIC_BASE_URL) {
