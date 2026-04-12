@@ -61,6 +61,12 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  buildResearchModePrompt,
+  classifyResearchMode,
+  isResearchModeCommand,
+  shouldAgentRunForResearchMode,
+} from './research-mode.js';
+import {
   restoreRemoteControl,
   startRemoteControl,
   stopRemoteControl,
@@ -158,7 +164,10 @@ function saveState(): void {
   setRouterState('last_agent_timestamp', JSON.stringify(lastAgentTimestamp));
 }
 
-function messageAddressesOnlyOtherBot(message: NewMessage, group: RegisteredGroup): boolean {
+function messageAddressesOnlyOtherBot(
+  message: NewMessage,
+  group: RegisteredGroup,
+): boolean {
   if (OTHER_BOT_TRIGGERS.length === 0) return false;
   const content = message.content.trim();
   const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
@@ -173,6 +182,29 @@ function retryMessageCheckSoon(chatJid: string): void {
     queue.enqueueMessageCheck(chatJid);
     queue.closeStdin(chatJid);
   }, 2000);
+}
+
+function isResearchGroup(group: RegisteredGroup): boolean {
+  return /research/i.test(`${group.name} ${group.folder}`);
+}
+
+function canMessageStartResearchMode(
+  message: NewMessage,
+  group: RegisteredGroup,
+  chatJid: string,
+): boolean {
+  if (!isResearchGroup(group)) return false;
+  if (message.is_bot_message) return false;
+  if (message.is_from_me) return true;
+  return isTriggerAllowed(chatJid, message.sender, loadSenderAllowlist());
+}
+
+function getAgentAuthProblem(): string | null {
+  const token = process.env.ANTHROPIC_AUTH_TOKEN?.trim();
+  if (!token || token === 'YOUR_OPENROUTER_API_KEY') {
+    return 'NanoClaw cannot answer yet because the OpenRouter API key is not configured. Replace the placeholder in this agent .env with a real OpenRouter key, then restart with ./start.sh stop && ./start.sh.';
+  }
+  return null;
 }
 
 function registerGroup(jid: string, group: RegisteredGroup): void {
@@ -247,27 +279,6 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
-function enforceSecondaryCheckerRole(prompt: string): string {
-  if (ASSISTANT_NAME.toLowerCase() !== 'bob') return prompt;
-  if (!WAIT_FOR_BOT_RESPONSE) return prompt;
-  if (!prompt.includes('sender="Andy (other bot)"')) return prompt;
-
-  return [
-    '<secondary_checker_instruction>',
-    'You are Bob acting after Andy in the User -> Andy -> Bob sequence.',
-    'Your job for this turn is to verify Andy, not duplicate Andy.',
-    'If Andy claims a shared file was created or updated, you MUST first run `workspace-read <path>` or `workspace-list /workspace/common` to inspect the actual file.',
-    'After the tool result, compare the real file with the user request and Andy claim.',
-    'If it matches, give a short verification only. Do not say you created the file.',
-    'For .txt/.md files, readable formatting is part of verification: if the user asked for multiple sentences, steps, bullets, or sections and the file is one long line, treat that as a formatting problem.',
-    'Only use `workspace-write` if the file is missing, incorrect, too shallow for the user request, badly formatted for the request, or contains literal prompt text.',
-    'Do not ask whether to proceed when verification shows a clear fix is needed.',
-    '</secondary_checker_instruction>',
-    '',
-    prompt,
-  ].join('\n');
-}
-
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -314,9 +325,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         otherPatterns.some((p) => p.test(m.content.trim())),
     );
     const hasMine = missedMessages.some(
-      (m) => !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
+      (m) =>
+        !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
     );
     if (hasOther && !hasMine) return true;
+  }
+
+  const modeDecision = newestHumanMsg
+    ? classifyResearchMode(newestHumanMsg.content)
+    : null;
+  if (
+    modeDecision &&
+    !shouldAgentRunForResearchMode(modeDecision.mode, WAIT_FOR_BOT_RESPONSE)
+  ) {
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    logger.info(
+      { group: group.name, mode: modeDecision.mode },
+      'Skipping message due to research group mode',
+    );
+    return true;
   }
 
   // Secondary bot ordering: wait for the primary bot to respond first on no-trigger messages
@@ -324,7 +353,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const myPattern = getTriggerPattern(group.trigger);
     const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
     const hasMyTrigger = missedMessages.some(
-      (m) => !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
+      (m) =>
+        !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
     );
     const hasOtherTrigger = missedMessages.some(
       (m) =>
@@ -333,7 +363,8 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         otherPatterns.some((p) => p.test(m.content.trim())),
     );
     if (!hasMyTrigger && !hasOtherTrigger) {
-      const cursor = newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
+      const cursor =
+        newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
       if (!hasCrossBotResponse(chatJid, cursor)) {
         retryMessageCheckSoon(chatJid);
         return true; // Primary bot hasn't responded yet — wait and poll again
@@ -347,13 +378,23 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     const allowlistCfg = loadSenderAllowlist();
     const hasTrigger = missedMessages.some(
       (m) =>
-        triggerPattern.test(m.content.trim()) &&
+        (triggerPattern.test(m.content.trim()) ||
+          isResearchModeCommand(m.content) ||
+          canMessageStartResearchMode(m, group, chatJid)) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
     if (!hasTrigger) return true;
   }
 
-  const prompt = enforceSecondaryCheckerRole(formatMessages(missedMessages, TIMEZONE));
+  const formattedPrompt = formatMessages(missedMessages, TIMEZONE);
+  const prompt = modeDecision
+    ? buildResearchModePrompt(
+        formattedPrompt,
+        modeDecision,
+        ASSISTANT_NAME,
+        WAIT_FOR_BOT_RESPONSE,
+      )
+    : formattedPrompt;
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -366,6 +407,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     { group: group.name, messageCount: missedMessages.length },
     'Processing messages',
   );
+
+  const authProblem = getAgentAuthProblem();
+  if (authProblem) {
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    logger.error({ group: group.name }, 'Agent auth is not configured');
+    await channel.sendMessage(chatJid, authProblem);
+    return true;
+  }
 
   // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -615,16 +666,53 @@ async function startMessageLoop(): Promise<void> {
             const allowlistCfg = loadSenderAllowlist();
             const hasTrigger = groupMessages.some(
               (m) =>
-                triggerPattern.test(m.content.trim()) &&
+                (triggerPattern.test(m.content.trim()) ||
+                  isResearchModeCommand(m.content) ||
+                  canMessageStartResearchMode(m, group, chatJid)) &&
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
             if (!hasTrigger) continue;
           }
 
+          const newestHumanMsg = [...groupMessages]
+            .reverse()
+            .find((m) => !m.is_from_me && !m.is_bot_message);
+          const modeDecision = newestHumanMsg
+            ? classifyResearchMode(newestHumanMsg.content)
+            : null;
+          if (
+            modeDecision &&
+            !shouldAgentRunForResearchMode(
+              modeDecision.mode,
+              WAIT_FOR_BOT_RESPONSE,
+            )
+          ) {
+            const allPending = getMessagesSince(
+              chatJid,
+              getOrRecoverCursor(chatJid),
+              ASSISTANT_NAME,
+              MAX_MESSAGES_PER_PROMPT,
+            );
+            const messagesToSkip =
+              allPending.length > 0 ? allPending : groupMessages;
+            lastAgentTimestamp[chatJid] =
+              messagesToSkip[messagesToSkip.length - 1].timestamp;
+            saveState();
+            logger.info(
+              { group: group.name, mode: modeDecision.mode },
+              'Skipping message due to research group mode',
+            );
+            continue;
+          }
+
           // Secondary bot ordering must also apply in the hot path where
           // an active container can receive piped messages directly.
-          if (!isMainGroup && WAIT_FOR_BOT_RESPONSE && OTHER_BOT_TRIGGERS.length > 0) {
+          if (
+            !isMainGroup &&
+            WAIT_FOR_BOT_RESPONSE &&
+            OTHER_BOT_TRIGGERS.length > 0
+          ) {
             const myPattern = getTriggerPattern(group.trigger);
             const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
             const hasMyTrigger = groupMessages.some(
@@ -662,9 +750,15 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = enforceSecondaryCheckerRole(
-            formatMessages(messagesToSend, TIMEZONE),
-          );
+          const formattedBase = formatMessages(messagesToSend, TIMEZONE);
+          const formatted = modeDecision
+            ? buildResearchModePrompt(
+                formattedBase,
+                modeDecision,
+                ASSISTANT_NAME,
+                WAIT_FOR_BOT_RESPONSE,
+              )
+            : formattedBase;
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -811,7 +905,10 @@ async function main(): Promise<void> {
     if (!group) {
       const channel = findChannel(channels, chatJid);
       if (channel) {
-        await channel.sendMessage(chatJid, 'Codex commands are only enabled in registered chats.');
+        await channel.sendMessage(
+          chatJid,
+          'Codex commands are only enabled in registered chats.',
+        );
       }
       logger.warn(
         { chatJid, sender: msg.sender },
@@ -874,7 +971,10 @@ async function main(): Promise<void> {
     if (!group) {
       const channel = findChannel(channels, chatJid);
       if (channel) {
-        await channel.sendMessage(chatJid, 'Claude commands are only enabled in registered chats.');
+        await channel.sendMessage(
+          chatJid,
+          'Claude commands are only enabled in registered chats.',
+        );
       }
       logger.warn(
         { chatJid, sender: msg.sender },
@@ -931,7 +1031,9 @@ async function main(): Promise<void> {
   function extractCodexPrompt(text: string): string | null {
     const trimmed = text.trim();
     if (/^\/codex\b/i.test(trimmed)) {
-      const prompt = trimmed.replace(/^\/(?:codex|claude)\b[:\s-]*/i, '').trim();
+      const prompt = trimmed
+        .replace(/^\/(?:codex|claude)\b[:\s-]*/i, '')
+        .trim();
       return prompt || null;
     }
 
@@ -961,7 +1063,9 @@ async function main(): Promise<void> {
   function extractClaudePrompt(text: string): string | null {
     const trimmed = text.trim();
     if (/^\/claude\b/i.test(trimmed)) {
-      const prompt = trimmed.replace(/^\/(?:claude|claude)\b[:\s-]*/i, '').trim();
+      const prompt = trimmed
+        .replace(/^\/(?:claude|claude)\b[:\s-]*/i, '')
+        .trim();
       return prompt || null;
     }
 
@@ -1007,10 +1111,12 @@ async function main(): Promise<void> {
         const addressesMe = !!myPattern?.test(trimmed);
         const addressesOther = otherPatterns.some((p) => p.test(trimmed));
         const shouldHandleCodex =
-          group?.isMain || addressesMe || (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
+          group?.isMain ||
+          addressesMe ||
+          (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
         if (shouldHandleCodex) {
-          handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch((err) =>
-            logger.error({ err, chatJid }, 'Codex command error'),
+          handleCodexCommand(`/codex ${codexPrompt}`, chatJid, msg).catch(
+            (err) => logger.error({ err, chatJid }, 'Codex command error'),
           );
         }
         return;
@@ -1023,10 +1129,12 @@ async function main(): Promise<void> {
         const addressesMe = !!myPattern?.test(trimmed);
         const addressesOther = otherPatterns.some((p) => p.test(trimmed));
         const shouldHandleClaude =
-          group?.isMain || addressesMe || (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
+          group?.isMain ||
+          addressesMe ||
+          (!WAIT_FOR_BOT_RESPONSE && !addressesOther);
         if (shouldHandleClaude) {
-          handleClaudeCommand(`/claude ${claudePrompt}`, chatJid, msg).catch((err) =>
-            logger.error({ err, chatJid }, 'Claude command error'),
+          handleClaudeCommand(`/claude ${claudePrompt}`, chatJid, msg).catch(
+            (err) => logger.error({ err, chatJid }, 'Claude command error'),
           );
         }
         return;

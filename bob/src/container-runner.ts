@@ -65,6 +65,64 @@ const PASSTHROUGH_ENV_VARS = [
   'GITHUB_TOKEN',
   'GH_TOKEN',
 ] as const;
+const SECRET_ENV_VARS = new Set([
+  'ANTHROPIC_AUTH_TOKEN',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+]);
+const CONTAINER_NODE_UID = 1000;
+const CONTAINER_NODE_GID = 1000;
+
+function redactContainerArgs(args: string[]): string {
+  return args
+    .map((arg) => {
+      const eqIdx = arg.indexOf('=');
+      if (eqIdx === -1) return arg;
+      const key = arg.slice(0, eqIdx);
+      if (!SECRET_ENV_VARS.has(key)) return arg;
+      return `${key}=<redacted>`;
+    })
+    .join(' ');
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return (
+    relative === '' ||
+    (!relative.startsWith('..') && !path.isAbsolute(relative))
+  );
+}
+
+function makeWritableByContainerNode(hostPath: string): void {
+  if (process.getuid?.() !== 0) return;
+  try {
+    const stat = fs.statSync(hostPath);
+    fs.chownSync(hostPath, CONTAINER_NODE_UID, CONTAINER_NODE_GID);
+    if (stat.isDirectory()) {
+      fs.chmodSync(hostPath, 0o775);
+      for (const entry of fs.readdirSync(hostPath)) {
+        makeWritableByContainerNode(path.join(hostPath, entry));
+      }
+    }
+  } catch (err) {
+    logger.warn({ err, hostPath }, 'Failed to adjust writable mount ownership');
+  }
+}
+
+function prepareManagedWritableMounts(
+  mounts: VolumeMount[],
+  managedRoots: string[],
+): void {
+  for (const mount of mounts) {
+    if (mount.readonly) continue;
+    const managed = managedRoots.some((root) =>
+      isPathInside(root, mount.hostPath),
+    );
+    if (managed) {
+      makeWritableByContainerNode(mount.hostPath);
+    }
+  }
+}
 
 function buildVolumeMounts(
   group: RegisteredGroup,
@@ -350,7 +408,7 @@ export async function runContainerAgent(
         (m) =>
           `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
       ),
-      containerArgs: containerArgs.join(' '),
+      containerArgs: redactContainerArgs(containerArgs),
     },
     'Container mount configuration',
   );
@@ -580,7 +638,7 @@ export async function runContainerAgent(
         }
         logLines.push(
           `=== Container Args ===`,
-          containerArgs.join(' '),
+          redactContainerArgs(containerArgs),
           ``,
           `=== Mounts ===`,
           mounts

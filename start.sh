@@ -6,27 +6,26 @@ LOG_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$SCRIPT_DIR/.agents.pid"
 mkdir -p "$LOG_DIR"
 
-# Only trim logs at least this many bytes (avoids rewriting tiny files).
-MIN_LOG_TRIM_BYTES="${MIN_LOG_TRIM_BYTES:-65536}"
+# Keep orchestration logs bounded. By default, each logs/*.log file is capped
+# at 50,000 bytes by dropping the oldest bytes and keeping the newest tail.
+LOG_MAX_BYTES="${LOG_MAX_BYTES:-50000}"
+LOG_TRIM_INTERVAL_SECONDS="${LOG_TRIM_INTERVAL_SECONDS:-30}"
 
-# Remove the oldest ~50% of each *.log (by bytes), keep the newest half.
-trim_orchestration_logs_oldest_half() {
+trim_orchestration_logs_to_cap() {
   shopt -s nullglob
-  local f size half tmp newsize
+  local f size tmp newsize
   for f in "$LOG_DIR"/*.log; do
     [[ -f "$f" ]] || continue
     size=$(wc -c <"$f" | awk '{print $1}')
-    if ! [[ "$size" =~ ^[0-9]+$ ]] || ((size < MIN_LOG_TRIM_BYTES)); then
+    if ! [[ "$size" =~ ^[0-9]+$ ]] || ((size <= LOG_MAX_BYTES)); then
       continue
     fi
-    half=$((size / 2))
-    ((half < 1)) && continue
     tmp="${f}.tmp.$$"
-    if tail -c +$((half + 1)) "$f" >"$tmp" 2>/dev/null; then
+    if tail -c "$LOG_MAX_BYTES" "$f" >"$tmp" 2>/dev/null; then
       newsize=$(wc -c <"$tmp" | awk '{print $1}')
-      if [[ "$newsize" =~ ^[0-9]+$ ]] && ((newsize > 0)); then
+      if [[ "$newsize" =~ ^[0-9]+$ ]] && ((newsize <= LOG_MAX_BYTES)); then
         mv "$tmp" "$f"
-        echo "Trimmed oldest ~50% of $(basename "$f") (was ${size} bytes → ${newsize} bytes)"
+        echo "Trimmed $(basename "$f") to ${newsize} bytes (was ${size} bytes)"
       else
         rm -f "$tmp"
       fi
@@ -36,6 +35,18 @@ trim_orchestration_logs_oldest_half() {
   done
   shopt -u nullglob
 }
+
+start_log_trimmer_loop() {
+  while true; do
+    trim_orchestration_logs_to_cap || true
+    sleep "$LOG_TRIM_INTERVAL_SECONDS"
+  done
+}
+
+if [[ "${1:-}" == "log-trimmer-loop" ]]; then
+  start_log_trimmer_loop
+  exit 0
+fi
 
 # ── logs-clean ───────────────────────────────────────────────────────────────
 # Truncate orchestration logs (andy/bob/bridge) so they do not grow without bound.
@@ -91,8 +102,8 @@ if [[ "${1:-}" == "stop" ]]; then
   fi
   pkill -f "nano-claw-agents/.*/dist/index.js" 2>/dev/null || true
   pkill -f "bot-bridge.sh" 2>/dev/null || true
-  echo "Trimming large logs (dropping oldest ~50% per file)…"
-  trim_orchestration_logs_oldest_half || true
+  echo "Trimming logs to ${LOG_MAX_BYTES} bytes per file…"
+  trim_orchestration_logs_to_cap || true
   exit 0
 fi
 
@@ -109,8 +120,8 @@ fi
 pkill -f "nano-claw-agents/.*/dist/index.js" 2>/dev/null || true
 pkill -f "bot-bridge.sh" 2>/dev/null || true
 sleep 1
-echo "Trimming large logs (dropping oldest ~50% per file)…"
-trim_orchestration_logs_oldest_half || true
+echo "Trimming logs to ${LOG_MAX_BYTES} bytes per file…"
+trim_orchestration_logs_to_cap || true
 
 # NanoClaw reads `.env` from each agent directory (cwd). Seed from repo-root templates if missing.
 sync_agent_env() {
@@ -163,18 +174,23 @@ echo "Starting bot-bridge..."
 nohup bash "$SCRIPT_DIR/bot-bridge.sh" >> "$LOG_DIR/bridge.log" 2>&1 &
 BRIDGE_PID=$!
 
+echo "Starting log trimmer..."
+nohup bash "$SCRIPT_DIR/start.sh" log-trimmer-loop >> "$LOG_DIR/log-trimmer.log" 2>&1 &
+TRIMMER_PID=$!
+
 # Save PIDs
-printf '%s\n' "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" > "$PID_FILE"
+printf '%s\n' "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" "$TRIMMER_PID" > "$PID_FILE"
 
 # Disown so agents keep running after this script exits
-disown "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID"
+disown "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" "$TRIMMER_PID"
 
 echo ""
 echo "Agents running in background."
 echo "  Andy PID : $ANDY_PID"
 echo "  Bob PID  : $BOB_PID"
 echo "  Bridge   : $BRIDGE_PID"
+echo "  Trimmer  : $TRIMMER_PID"
 echo ""
 echo "Logs : $LOG_DIR/andy.log | $LOG_DIR/bob.log | $LOG_DIR/bridge.log"
-echo "Stop : ./start.sh stop  (large logs: oldest ~50% trimmed automatically)"
+echo "Stop : ./start.sh stop  (logs are capped at ${LOG_MAX_BYTES} bytes automatically)"
 echo "Full clear: ./start.sh logs-clean"
