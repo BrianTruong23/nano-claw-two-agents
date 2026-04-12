@@ -8,6 +8,7 @@ logs/
 .env
 .env_andy
 .env_bob
+.env_bridge
 
 */.env
 */*/.env
@@ -36,5 +37,8 @@ Thumbs.db
 
 # Shared Code Workspace
 workspace/
+
+# Shared bind-mount directory (Andy/Bob); ignore entire tree
+common/
 
 .gitignore
