@@ -50,6 +50,7 @@ import {
   getNewMessages,
   getRouterState,
   hasCrossBotResponseLoose,
+  isSubstantiveCrossBotForVerify,
   isRoutingBanner,
   isProgressPing,
   isGroupChat,
