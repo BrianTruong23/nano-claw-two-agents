@@ -16,6 +16,7 @@ import {
   OTHER_BOT_TRIGGERS,
   POLL_INTERVAL,
   TIMEZONE,
+  VERIFY_PRIMARY_TIMEOUT_MS,
   WAIT_FOR_BOT_RESPONSE,
 } from './config.js';
 import './channels/index.js';
@@ -48,7 +49,7 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
-  hasCrossBotResponse,
+  hasCrossBotResponseLoose,
   isRoutingBanner,
   isProgressPing,
   isGroupChat,
@@ -64,11 +65,19 @@ import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
 import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
+  isPrimaryAssistantName,
+  recordPrimaryTelegramMessage,
+  shouldRecordAsPrimaryTelegramAnchor,
+} from './telegram-thread-heads.js';
+import { maybeSendTelegramVerifyThreadChip } from './telegram-verify-chip.js';
+import {
   buildResearchModePrompt,
   classifyResearchMode,
   formatResearchModeUserNotice,
+  getConfiguredPrimaryAssistantName,
   humanWantsGitMachineReport,
   isResearchModeCommand,
+  messageMentionsConfiguredPrimary,
   shouldAgentRunForResearchMode,
 } from './research-mode.js';
 import {
@@ -190,6 +199,11 @@ function retryMessageCheckSoon(chatJid: string): void {
   }, 2000);
 }
 
+/** Include peer Telegram bots' @-mentions of the primary so verify handoffs reach the primary DB. */
+function peerHandoffMentionForDb(): string | undefined {
+  return WAIT_FOR_BOT_RESPONSE ? undefined : getConfiguredPrimaryAssistantName();
+}
+
 function canMessageStartResearchMode(
   message: NewMessage,
   _group: RegisteredGroup,
@@ -203,9 +217,10 @@ function canMessageStartResearchMode(
 
 function isPrimaryFixHandoffMessage(message: NewMessage): boolean {
   if (WAIT_FOR_BOT_RESPONSE) return false;
-  if (!message.is_bot_message || message.is_from_me) return false;
-  const mentionPattern = new RegExp(`@${ASSISTANT_NAME}\\b`, 'i');
-  return mentionPattern.test(message.content);
+  if (message.is_from_me) return false;
+  // Do not require is_bot_message: Telegram inbound often omits it, and
+  // verify handoffs must still match @primary from the peer process.
+  return messageMentionsConfiguredPrimary(message.content);
 }
 
 function shouldWaitForPrimaryResearchTurn(
@@ -217,7 +232,7 @@ function shouldWaitForPrimaryResearchTurn(
   if (isMainGroup || !WAIT_FOR_BOT_RESPONSE) return false;
   if (!modeDecision || !newestHumanMsg) return false;
   const cursor = newestHumanMsg.timestamp || lastAgentTimestamp[chatJid] || '';
-  return !hasCrossBotResponse(chatJid, cursor);
+  return !hasCrossBotResponseLoose(chatJid, cursor);
 }
 
 function getAgentAuthProblem(): string | null {
@@ -321,6 +336,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     getOrRecoverCursor(chatJid),
     ASSISTANT_NAME,
     MAX_MESSAGES_PER_PROMPT,
+    peerHandoffMentionForDb(),
   );
 
   if (missedMessages.length === 0) return true;
@@ -347,6 +363,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     saveState();
     return true;
   }
+  let verifierTimeoutOverride = false;
   if (OTHER_BOT_TRIGGERS.length > 0 && newestHumanMsg) {
     const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
     const myPattern = getTriggerPattern(group.trigger);
@@ -354,7 +371,36 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       p.test(newestHumanMsg.content.trim()),
     );
     const addressesMe = myPattern.test(newestHumanMsg.content.trim());
-    if (addressesOther && !addressesMe) return true;
+    if (addressesOther && !addressesMe) {
+      // Verifier mode: wait for primary unless it times out.
+      if (WAIT_FOR_BOT_RESPONSE) {
+        const sinceTs = newestHumanMsg.timestamp;
+        const hasBotWork = missedMessages.some(
+          (m) =>
+            !m.is_from_me &&
+            m.is_bot_message &&
+            m.timestamp > sinceTs &&
+            isSubstantiveCrossBotForVerify(m.content),
+        );
+        if (!hasBotWork) {
+          const startedAt = Date.parse(sinceTs);
+          if (Number.isFinite(startedAt)) {
+            const waitedMs = Date.now() - startedAt;
+            if (waitedMs >= VERIFY_PRIMARY_TIMEOUT_MS) {
+              verifierTimeoutOverride = true;
+            } else {
+              retryMessageCheckSoon(chatJid);
+              return true;
+            }
+          } else {
+            retryMessageCheckSoon(chatJid);
+            return true;
+          }
+        }
+      } else {
+        return true;
+      }
+    }
   }
 
   // Research modes apply only to multi-user groups (chats.is_group = 1), not DMs.
@@ -423,7 +469,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     );
     if (idx >= 0) messagesForPrompt = substantiveMessages.slice(idx);
   }
-  const formattedPrompt = formatMessages(messagesForPrompt, TIMEZONE);
+  let formattedPrompt = formatMessages(messagesForPrompt, TIMEZONE);
+  if (verifierTimeoutOverride) {
+    formattedPrompt =
+      `[Verifier fallback]\n` +
+      `Primary bot did not produce a substantive reply within ${Math.round(
+        VERIFY_PRIMARY_TIMEOUT_MS / 60000,
+      )} minutes. Proceed to verify/complete the task and clearly state what you are assuming.\n\n` +
+      formattedPrompt;
+  }
   const prompt = modeDecision
     ? buildResearchModePrompt(
         formattedPrompt,
@@ -516,15 +570,27 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
         logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
         if (text) {
-          await channel.sendMessage(chatJid, text);
+          const meta = await channel.sendMessage(chatJid, text);
           outputSentToUser = true;
+          if (
+            channel.name === 'telegram' &&
+            isPrimaryAssistantName(ASSISTANT_NAME) &&
+            shouldRecordAsPrimaryTelegramAnchor(text) &&
+            meta.telegramMessageId
+          ) {
+            recordPrimaryTelegramMessage(chatJid, meta.telegramMessageId);
+          }
         }
         // Only reset idle timer on actual results, not session-update markers (result: null)
         resetIdleTimer();
       }
 
       if (result.status === 'success') {
-        queue.notifyIdle(chatJid);
+        const progressOnly =
+          typeof result.result === 'string' && isProgressPing(result.result);
+        if (!progressOnly) {
+          queue.notifyIdle(chatJid);
+        }
       }
 
       if (result.status === 'error') {
@@ -571,6 +637,16 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       'Agent error, rolled back message cursor for retry',
     );
     return false;
+  }
+
+  if (outputSentToUser) {
+    await maybeSendTelegramVerifyThreadChip({
+      chatJid,
+      channel,
+      assistantName: ASSISTANT_NAME,
+      modeDecision,
+      waitForBotResponse: WAIT_FOR_BOT_RESPONSE,
+    });
   }
 
   return true;
@@ -702,6 +778,8 @@ async function startMessageLoop(): Promise<void> {
         jids,
         lastTimestamp,
         ASSISTANT_NAME,
+        200,
+        WAIT_FOR_BOT_RESPONSE ? undefined : getConfiguredPrimaryAssistantName(),
       );
 
       if (messages.length > 0) {
@@ -785,6 +863,7 @@ async function startMessageLoop(): Promise<void> {
               getOrRecoverCursor(chatJid),
               ASSISTANT_NAME,
               MAX_MESSAGES_PER_PROMPT,
+              peerHandoffMentionForDb(),
             );
             const messagesToSkip =
               allPending.length > 0 ? allPending : groupMessages;
@@ -819,6 +898,7 @@ async function startMessageLoop(): Promise<void> {
             getOrRecoverCursor(chatJid),
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
+            peerHandoffMentionForDb(),
           );
           const rawMessagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
@@ -904,6 +984,7 @@ function recoverPendingMessages(): void {
       getOrRecoverCursor(chatJid),
       ASSISTANT_NAME,
       MAX_MESSAGES_PER_PROMPT,
+      peerHandoffMentionForDb(),
     );
     if (pending.length > 0) {
       logger.info(
@@ -1307,21 +1388,22 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) =>
       queue.registerProcess(groupJid, proc, containerName, groupFolder),
-    sendMessage: async (jid, rawText) => {
+    sendMessage: async (jid, rawText, options) => {
       const channel = findChannel(channels, jid);
       if (!channel) {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
-        return;
+        return {};
       }
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (text) return await channel.sendMessage(jid, text, options);
+      return {};
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: (jid, text, options) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      return channel.sendMessage(jid, text, options);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

@@ -21,6 +21,7 @@ const envConfig = readEnvFile([
   'CONTROL_PLANE_FAILURE_STATUS',
   'OTHER_BOT_TRIGGER',
   'WAIT_FOR_BOT_RESPONSE',
+  'VERIFY_PRIMARY_TIMEOUT_MS',
 ]);
 
 export const ASSISTANT_NAME =
@@ -170,3 +171,19 @@ export const OTHER_BOT_TRIGGERS: string[] = (
   .filter(Boolean);
 export const WAIT_FOR_BOT_RESPONSE =
   (process.env['WAIT_FOR_BOT_RESPONSE'] || envConfig['WAIT_FOR_BOT_RESPONSE']) === 'true';
+
+/**
+ * When running as the secondary verifier (WAIT_FOR_BOT_RESPONSE=true), how long to wait
+ * for the primary bot to post a substantive cross-bot reply before stepping in anyway.
+ *
+ * Default: 5 minutes.
+ */
+export const VERIFY_PRIMARY_TIMEOUT_MS = Math.max(
+  0,
+  parseInt(
+    process.env.VERIFY_PRIMARY_TIMEOUT_MS ||
+      envConfig.VERIFY_PRIMARY_TIMEOUT_MS ||
+      '300000',
+    10,
+  ) || 300000,
+);
