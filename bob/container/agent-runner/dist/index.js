@@ -15,7 +15,7 @@ const IPC_POLL_MS = 500;
 const SCRIPT_TIMEOUT_MS = 30_000;
 const TOOL_TIMEOUT_MS = 30_000;
 /** Max (model reply → execute parsed tools) cycles before forcing a plain-language wrap-up. */
-const MAX_TOOL_ROUNDS = 8;
+const MAX_TOOL_ROUNDS = 20;
 const MAX_TOOL_COMMANDS_PER_TURN = 4;
 const GROUP_DIR = '/workspace/group';
 const GLOBAL_DIR = '/workspace/global';
@@ -127,14 +127,20 @@ function readInstalledSkills() {
 function buildSystemPrompt(containerInput) {
     const parts = [
         `You are ${containerInput.assistantName || 'Andy'}, the NanoClaw assistant replying inside a chat.`,
-        'Be concise, direct, and helpful.',
+        'Be direct and helpful. Once a task is done, summarize concisely; while work is in progress, prioritize finishing (reads/edits/git) over stopping early for brevity.',
         'If the user asks for code or debugging help, focus on actionable technical guidance.',
         'Do not claim to have completed actions you did not actually complete. If a tool failed, say so and quote stderr from the tool results.',
         'Tools only run when you emit a whole line or single-backtick line starting with an allowed command (see below). Prose alone does not run anything.',
-        'Executable commands: agent-browser, github, safe git commands, workspace-git-clone, workspace-list, workspace-read, workspace-write, workspace-delete, workspace-rename, workspace-mkdir, workspace-copy, workspace-download, touch.',
+        'Executable commands: agent-browser, github, safe git commands, workspace-git-clone, workspace-git-status, workspace-list, workspace-read, workspace-write, workspace-delete, workspace-rename, workspace-mkdir, workspace-copy, workspace-download, touch.',
         'Shared Andy/Bob files live under /workspace/common. Prefer `workspace-git-clone <url>` or `workspace-git-clone <url> <folder_name>` so the clone runs with cwd=/workspace/common (no path mistakes).',
         'Plain `git clone <url>` runs with cwd=/workspace/project (NanoClaw app tree), not common — only use it when you mean the project mount, or pass an explicit destination: `git clone <url> /workspace/common/<dir>`.',
+        'For git inside a clone under /workspace/common, use `git -C /workspace/common/<dir> <subcommand> …` (same whitelist as plain git). Plain `git status` without `-C` uses /workspace/project or /workspace/group, not the clone.',
+        'For shared clones, `github status /workspace/common/<dir>` and `github push [branch] /workspace/common/<dir>` run git in that repo (path must contain a .git directory). Plain `github status` is only for the project mount.',
+        'If there is exactly one git checkout directly under /workspace/common, plain git (except clone) without `-C`, and `github status` / `github push` without a path, run in that checkout when the project mount is not a repo. With several clones, pass explicit paths or use `git -C`.',
         'For chat-specific notes, use /workspace/group.',
+        'Multi-step jobs (UI refactors, repo changes, etc.): keep emitting whole-line tool commands each turn until the user\'s outcome is actually done — not after a plan or one or two file peeks. If more files or edits remain, your next reply must include more tools, not only prose.',
+        'When you change files in a clone under /workspace/common, finish with git add → git commit → github push (correct repo path) unless the user said not to push. Commits use GIT_AUTHOR_* from the environment (set NANOCLAW_GIT_AUTHOR_NAME / NANOCLAW_GIT_AUTHOR_EMAIL on the host, or defaults apply) — you do not need `git config` for author unless overriding.',
+        'Staging: use `git add -A` or explicit paths from `git status` output; bare `git add` with no paths does nothing.',
     ];
     const groupMemory = readOptionalFile(path.join(GROUP_DIR, 'CLAUDE.md'));
     const globalMemory = readOptionalFile(path.join(GLOBAL_DIR, 'CLAUDE.md'));
@@ -399,31 +405,220 @@ function normalizeAgentBrowserArgs(args) {
         return ['open', target];
     return ['open', `https://search.brave.com/search?q=${encodeURIComponent(target)}`];
 }
+const ALLOWED_GIT_SUBCOMMANDS = new Set([
+    'add',
+    'branch',
+    'checkout',
+    'clone',
+    'commit',
+    'config',
+    'diff',
+    'fetch',
+    'log',
+    'merge',
+    'pull',
+    'push',
+    'rebase',
+    'remote',
+    'revert',
+    'stash',
+    'status',
+]);
+/** Only user.name / user.email; optional --local or --global before the key. */
+function isSafeGitConfigArgs(parts) {
+    const idx = parts.indexOf('config');
+    if (idx === -1)
+        return false;
+    const after = parts.slice(idx + 1);
+    let i = 0;
+    while (i < after.length && after[i].startsWith('--')) {
+        const flag = after[i];
+        if (flag === '--local' || flag === '--global') {
+            i += 1;
+            continue;
+        }
+        return false;
+    }
+    if (i >= after.length)
+        return false;
+    const key = after[i];
+    if (key !== 'user.name' && key !== 'user.email')
+        return false;
+    return after.length >= i + 2 && Boolean(after[i + 1]);
+}
+function isPathUnderWorkspaceCommon(resolvedPath) {
+    const root = path.resolve(COMMON_DIR);
+    const p = path.resolve(resolvedPath);
+    return p === root || p.startsWith(`${root}${path.sep}`);
+}
+/** Resolve git -C target: absolute paths normalized; relative paths only under /workspace/common. */
+function resolveGitCommonCDirectory(rawPath) {
+    if (!rawPath || rawPath === '...')
+        return null;
+    const candidate = path.isAbsolute(rawPath)
+        ? path.resolve(rawPath)
+        : path.resolve(COMMON_DIR, rawPath);
+    if (!isPathUnderWorkspaceCommon(candidate))
+        return null;
+    return candidate;
+}
+/** Directory under /workspace/common that contains a .git entry (repo root). */
+function resolveCommonGitWorktree(token) {
+    const resolved = resolveGitCommonCDirectory(token);
+    if (!resolved)
+        return null;
+    try {
+        if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory())
+            return null;
+        const gitEntry = path.join(resolved, '.git');
+        if (!fs.existsSync(gitEntry))
+            return null;
+    }
+    catch {
+        return null;
+    }
+    return resolved;
+}
+function isGitWorktree(dir) {
+    try {
+        return fs.existsSync(path.join(dir, '.git'));
+    }
+    catch {
+        return false;
+    }
+}
+/** Immediate child directories of /workspace/common that are git checkouts. */
+function listGitReposUnderCommon() {
+    ensureDir(COMMON_DIR);
+    const out = [];
+    for (const name of fs.readdirSync(COMMON_DIR)) {
+        if (name.startsWith('.'))
+            continue;
+        const p = path.join(COMMON_DIR, name);
+        try {
+            if (fs.statSync(p).isDirectory() && isGitWorktree(p)) {
+                out.push(p);
+            }
+        }
+        catch {
+            /* ignore */
+        }
+    }
+    return out.sort();
+}
+/** Canonicalize -C so Git does not resolve a relative path against /workspace/project. */
+function normalizeGitArgsForCommonC(args) {
+    if (args.length < 3 || args[0] !== '-C' || !args[1])
+        return args;
+    const resolved = resolveGitCommonCDirectory(args[1]);
+    if (!resolved)
+        return args;
+    return ['-C', resolved, ...args.slice(2)];
+}
+function gitSubcommandForTimeout(args) {
+    if (args.length >= 3 && args[0] === '-C' && args[2])
+        return args[2];
+    return args[0] || '';
+}
+/**
+ * Make common non-interactive git mistakes recoverable so turns can complete.
+ * We still keep validation as a safety net after normalization.
+ */
+function normalizeGitInvocation(argv) {
+    const out = [...argv];
+    const notes = [];
+    const addIdx = out.indexOf('add');
+    if (addIdx !== -1) {
+        const tail = out.slice(addIdx + 1);
+        const hasPathspec = tail.some((t) => t === '-A' ||
+            t === '--all' ||
+            t === '-u' ||
+            t === '--update' ||
+            t === '.' ||
+            (!t.startsWith('-') && t !== '--'));
+        if (!hasPathspec) {
+            out.splice(addIdx + 1, tail.length, '-A');
+            notes.push('auto-corrected `git add` to `git add -A`.');
+        }
+    }
+    const commitIdx = out.indexOf('commit');
+    if (commitIdx !== -1) {
+        const tail = out.slice(commitIdx + 1);
+        const joined = ` ${tail.join(' ')} `;
+        const hasMessage = /\s-m(\s|=)/.test(joined) ||
+            /\s-F(\s|=)/.test(joined) ||
+            /--message=/.test(joined) ||
+            /--file=/.test(joined) ||
+            /-m[^\s=]/.test(tail.join(' ')) ||
+            /\s-am(\s|$)/.test(joined) ||
+            /--no-edit\b/.test(joined);
+        if (!hasMessage) {
+            out.push('-m', 'chore: apply requested updates');
+            notes.push('auto-added a default commit message for non-interactive git.');
+        }
+    }
+    return { argv: out, notes };
+}
+/** Block bare `git add` / flags-only add (no -A / paths). */
+function validateGitAddInvocation(argv) {
+    const idx = argv.indexOf('add');
+    if (idx === -1)
+        return null;
+    const tail = argv.slice(idx + 1);
+    if (tail.length === 0) {
+        return 'git add: no pathspec. Use `git add -A` or `git -C /workspace/common/<repo> add -A`, or list explicit files.';
+    }
+    const hasPathspec = tail.some((t) => t === '-A' ||
+        t === '--all' ||
+        t === '-u' ||
+        t === '--update' ||
+        t === '.' ||
+        (!t.startsWith('-') && t !== '--'));
+    if (hasPathspec)
+        return null;
+    return 'git add: no pathspec after flags. Use `git add -A` or name specific files.';
+}
+/** Block `git commit` without -m / -F / --no-edit (no editor in container). */
+function validateGitCommitInvocation(argv) {
+    const idx = argv.indexOf('commit');
+    if (idx === -1)
+        return null;
+    const tail = argv.slice(idx + 1);
+    const joined = ` ${tail.join(' ')} `;
+    if (/\s-m(\s|=)/.test(joined) || /\s-F(\s|=)/.test(joined))
+        return null;
+    if (/--message=/.test(joined) || /--file=/.test(joined))
+        return null;
+    if (/-m[^\s=]/.test(tail.join(' ')))
+        return null;
+    if (/\s-am(\s|$)/.test(joined))
+        return null;
+    if (/--no-edit\b/.test(joined))
+        return null;
+    return ('git commit: no editor in this environment — use `git commit -m "your message"` ' +
+        '(or `git -C /workspace/common/<repo> commit -m "..."`).');
+}
 function isAllowedGitCommand(args) {
+    if (args.length >= 3 && args[0] === '-C') {
+        const resolved = resolveGitCommonCDirectory(args[1] || '');
+        if (!resolved)
+            return false;
+        const sub = args[2];
+        if (!sub)
+            return false;
+        if (sub === 'config')
+            return isSafeGitConfigArgs(args);
+        return ALLOWED_GIT_SUBCOMMANDS.has(sub);
+    }
     const subcommand = args[0];
     if (!subcommand)
         return false;
-    return new Set([
-        'add',
-        'branch',
-        'checkout',
-        'clone',
-        'commit',
-        'diff',
-        'fetch',
-        'log',
-        'merge',
-        'pull',
-        'push',
-        'rebase',
-        'remote',
-        'revert',
-        'stash',
-        'status',
-    ]).has(subcommand);
+    if (subcommand === 'config')
+        return isSafeGitConfigArgs(args);
+    return ALLOWED_GIT_SUBCOMMANDS.has(subcommand);
 }
 function isToolCommand(command) {
-    return /^(agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download|workspace-git-clone)\b/.test(command.trim());
+    return /^(agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download|workspace-git-clone|workspace-git-status)\b/.test(command.trim());
 }
 function extractToolCommands(reply) {
     const commands = [];
@@ -448,6 +643,8 @@ function extractToolCommands(reply) {
         if (executable === 'workspace-git-clone') {
             return Boolean(args[0] && args[0] !== '...');
         }
+        if (executable === 'workspace-git-status')
+            return true;
         return executable === 'agent-browser' || executable === 'workspace-list';
     };
     const add = (raw) => {
@@ -461,7 +658,7 @@ function extractToolCommands(reply) {
         seen.add(command);
         commands.push(command);
     };
-    for (const match of reply.matchAll(/`((?:agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download|workspace-git-clone)(?:\s+[^`]+)?)`/g)) {
+    for (const match of reply.matchAll(/`((?:agent-browser|git|github|touch|workspace-list|workspace-read|workspace-write|workspace-delete|workspace-rename|workspace-mkdir|workspace-copy|workspace-download|workspace-git-clone|workspace-git-status)(?:\s+[^`]+)?)`/g)) {
         add(match[1] || '');
     }
     for (const line of reply.split('\n')) {
@@ -474,11 +671,50 @@ function extractToolCommands(reply) {
 function commandCwd() {
     return fs.existsSync(PROJECT_DIR) ? PROJECT_DIR : GROUP_DIR;
 }
+/**
+ * Default exec cwd for git/github is project or group mount — usually not the clone under
+ * /workspace/common. When that cwd is not a git repo, use the only checkout under common if unambiguous.
+ */
+function resolveFallbackGitWorktreeCwd() {
+    const cwd = commandCwd();
+    if (isGitWorktree(cwd))
+        return { cwd };
+    const repos = listGitReposUnderCommon();
+    if (repos.length === 1)
+        return { cwd: repos[0] };
+    if (repos.length > 1) {
+        return {
+            cwd,
+            blocked: `Git would run in ${cwd}, which is not a git repository. Multiple clones under /workspace/common — pick one:\n` +
+                `${repos.map((p) => `- github status ${p}`).join('\n')}\n` +
+                `- or: workspace-git-status <folder>\n` +
+                `- or: git -C /workspace/common/<folder> <command>…`,
+        };
+    }
+    return {
+        cwd,
+        blocked: `Git would run in ${cwd}, which is not a git repository, and /workspace/common has no git checkout. ` +
+            `Clone with workspace-git-clone, then use github status /workspace/common/<dir> or workspace-git-status <dir>.`,
+    };
+}
 function gitEnv() {
     const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
+    const authorName = process.env.NANOCLAW_GIT_AUTHOR_NAME?.trim() ||
+        process.env.GIT_AUTHOR_NAME?.trim() ||
+        'NanoClaw Agent';
+    const authorEmail = process.env.NANOCLAW_GIT_AUTHOR_EMAIL?.trim() ||
+        process.env.GIT_AUTHOR_EMAIL?.trim() ||
+        'nanoclaw@localhost';
     const env = {
         ...process.env,
         GIT_TERMINAL_PROMPT: '0',
+        GIT_AUTHOR_NAME: authorName,
+        GIT_COMMITTER_NAME: authorName,
+        GIT_AUTHOR_EMAIL: authorEmail,
+        GIT_COMMITTER_EMAIL: authorEmail,
+        GIT_EDITOR: ':',
+        EDITOR: ':',
+        VISUAL: ':',
     };
     if (!token)
         return env;
@@ -508,26 +744,99 @@ async function execCommand(executable, args, options) {
         });
     });
 }
+async function buildGitOutcomeSnapshot(cwd) {
+    const env = gitEnv();
+    const [status, branch, head, aheadBehind] = await Promise.all([
+        execCommand('git', ['status', '--short', '--branch'], { cwd, env }),
+        execCommand('git', ['branch', '--show-current'], { cwd, env }),
+        execCommand('git', ['log', '-1', '--oneline'], { cwd, env }),
+        execCommand('git', ['rev-list', '--left-right', '--count', '@{upstream}...HEAD'], { cwd, env }),
+    ]);
+    return [
+        `[Git outcome snapshot cwd=${cwd}]`,
+        `status:\n${status}`,
+        `branch:\n${branch}`,
+        `head:\n${head}`,
+        `ahead_behind_vs_upstream:\n${aheadBehind}`,
+    ].join('\n\n');
+}
+function shouldAttachGitOutcomeSnapshot(subcommand) {
+    return (subcommand === 'add' ||
+        subcommand === 'commit' ||
+        subcommand === 'push' ||
+        subcommand === 'status');
+}
 async function runGithubPseudoCommand(args) {
     const action = args[0] || 'status';
     if (action === 'status') {
+        let cwd = commandCwd();
+        if (args.length >= 2) {
+            const worktree = resolveCommonGitWorktree(args[1] || '');
+            if (!worktree) {
+                return (`github status: "${args[1]}" is not a git repository under /workspace/common ` +
+                    `(need a clone with .git, e.g. /workspace/common/zettelkasten-weaver-extension). ` +
+                    `For the NanoClaw app tree use \`github status\` with no path, or \`git -C /workspace/common/<dir> status\`.`);
+            }
+            cwd = worktree;
+        }
+        else {
+            const fb = resolveFallbackGitWorktreeCwd();
+            if (fb.blocked)
+                return fb.blocked;
+            cwd = fb.cwd;
+        }
         const [status, remote, branch] = await Promise.all([
-            execCommand('git', ['status', '--short', '--branch'], {
-                cwd: commandCwd(),
-                env: gitEnv(),
-            }),
-            execCommand('git', ['remote', '-v'], { cwd: commandCwd(), env: gitEnv() }),
-            execCommand('git', ['branch', '--show-current'], {
-                cwd: commandCwd(),
-                env: gitEnv(),
-            }),
+            execCommand('git', ['status', '--short', '--branch'], { cwd, env: gitEnv() }),
+            execCommand('git', ['remote', '-v'], { cwd, env: gitEnv() }),
+            execCommand('git', ['branch', '--show-current'], { cwd, env: gitEnv() }),
         ]);
-        return [`git status:\n${status}`, `git remote:\n${remote}`, `branch:\n${branch}`].join('\n\n');
+        return [`git status (cwd ${cwd}):\n${status}`, `git remote:\n${remote}`, `branch:\n${branch}`].join('\n\n');
     }
     if (action === 'push') {
-        const branch = args[1];
+        const rest = args.slice(1);
+        const pushCwdWhenImplicit = () => {
+            if (isGitWorktree(commandCwd()))
+                return { cwd: commandCwd() };
+            return resolveFallbackGitWorktreeCwd();
+        };
+        if (rest.length === 0) {
+            const r = pushCwdWhenImplicit();
+            if (r.blocked)
+                return r.blocked;
+            const output = await execCommand('git', ['push'], {
+                cwd: r.cwd,
+                env: gitEnv(),
+                timeoutMs: 120_000,
+            });
+            const snapshot = await buildGitOutcomeSnapshot(r.cwd);
+            return `${output}\n\n${snapshot}`;
+        }
+        const last = rest[rest.length - 1] || '';
+        const worktree = resolveCommonGitWorktree(last);
+        if (worktree) {
+            const branchParts = rest.slice(0, -1);
+            const branchSpec = branchParts.join(' ').trim();
+            const pushArgs = branchSpec ? ['push', 'origin', branchSpec] : ['push'];
+            const output = await execCommand('git', pushArgs, {
+                cwd: worktree,
+                env: gitEnv(),
+                timeoutMs: 120_000,
+            });
+            const snapshot = await buildGitOutcomeSnapshot(worktree);
+            return `${output}\n\n${snapshot}`;
+        }
+        const branch = rest.join(' ');
         const pushArgs = branch ? ['push', 'origin', branch] : ['push'];
-        return execCommand('git', pushArgs, { cwd: commandCwd(), env: gitEnv(), timeoutMs: 120_000 });
+        const r = pushCwdWhenImplicit();
+        if (r.blocked)
+            return r.blocked;
+        const output = await execCommand('git', pushArgs, {
+            cwd: r.cwd,
+            env: gitEnv(),
+            timeoutMs: 120_000,
+        });
+        const snapshot = await buildGitOutcomeSnapshot(r.cwd);
+        return `${output}\n\n${snapshot}`;
     }
     if (action === 'whoami') {
         const token = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
@@ -543,7 +852,7 @@ async function runGithubPseudoCommand(args) {
         const text = await response.text();
         return `GitHub API status ${response.status}\n${text.slice(0, 4000)}`;
     }
-    return `Unsupported github command: ${['github', ...args].join(' ')}. Supported: github status, github push [branch], github whoami.`;
+    return `Unsupported github command: ${['github', ...args].join(' ')}. Supported: github status [path-in-common], github push [branch] [path-in-common], github whoami.`;
 }
 function resolveWorkspacePath(inputPath, defaultBase = COMMON_DIR) {
     const requested = inputPath || '.';
@@ -678,6 +987,27 @@ async function runWorkspaceGitClone(args) {
         timeoutMs: 120_000,
     });
 }
+async function runWorkspaceGitStatus(args) {
+    const name = args[0];
+    if (!name || name === '...') {
+        const repos = listGitReposUnderCommon();
+        if (repos.length === 0) {
+            return 'No git repositories found directly under /workspace/common. Usage: workspace-git-status <folder>';
+        }
+        if (repos.length === 1) {
+            return execCommand('git', ['status', '--short', '--branch'], {
+                cwd: repos[0],
+                env: gitEnv(),
+            });
+        }
+        return (`Multiple git repos under /workspace/common; specify folder:\n${repos.map((p) => `- workspace-git-status ${path.basename(p)}`).join('\n')}`);
+    }
+    const worktree = resolveCommonGitWorktree(name);
+    if (!worktree || !isGitWorktree(worktree)) {
+        return `Not a git checkout under /workspace/common: ${name}`;
+    }
+    return execCommand('git', ['status', '--short', '--branch'], { cwd: worktree, env: gitEnv() });
+}
 async function runToolCommand(command) {
     const parts = shellSplit(command);
     const executable = parts[0];
@@ -688,12 +1018,48 @@ async function runToolCommand(command) {
     if (executable === 'workspace-git-clone') {
         return runWorkspaceGitClone(args);
     }
+    if (executable === 'workspace-git-status') {
+        return runWorkspaceGitStatus(args);
+    }
     if (executable === 'git') {
         if (!isAllowedGitCommand(args)) {
             return `Skipped unsupported git command: ${command}`;
         }
-        const timeoutMs = args[0] === 'push' || args[0] === 'pull' || args[0] === 'fetch' || args[0] === 'clone' ? 120_000 : TOOL_TIMEOUT_MS;
-        return execCommand('git', args, { cwd: commandCwd(), env: gitEnv(), timeoutMs });
+        const rawExecArgs = args[0] === '-C' ? normalizeGitArgsForCommonC(args) : args;
+        const normalized = normalizeGitInvocation(rawExecArgs);
+        const execArgs = normalized.argv;
+        const subForTimeout = gitSubcommandForTimeout(execArgs);
+        const timeoutMs = subForTimeout === 'push' || subForTimeout === 'pull' || subForTimeout === 'fetch' || subForTimeout === 'clone'
+            ? 120_000
+            : TOOL_TIMEOUT_MS;
+        let execCwd = commandCwd();
+        if (args[0] !== '-C' && execArgs[0] !== 'clone') {
+            const resolved = resolveFallbackGitWorktreeCwd();
+            if (resolved.blocked)
+                return resolved.blocked;
+            execCwd = resolved.cwd;
+        }
+        const addHint = validateGitAddInvocation(execArgs);
+        if (addHint)
+            return addHint;
+        const commitHint = validateGitCommitInvocation(execArgs);
+        if (commitHint)
+            return commitHint;
+        const output = await execCommand('git', execArgs, {
+            cwd: execCwd,
+            env: gitEnv(),
+            timeoutMs,
+        });
+        const parts = [];
+        if (normalized.notes.length > 0) {
+            parts.push(normalized.notes.map((n) => `note: ${n}`).join('\n'));
+        }
+        parts.push(output);
+        if (shouldAttachGitOutcomeSnapshot(subForTimeout)) {
+            const snapshot = await buildGitOutcomeSnapshot(execCwd);
+            parts.push(snapshot);
+        }
+        return parts.join('\n\n');
     }
     if (executable === 'github') {
         return runGithubPseudoCommand(args);
@@ -734,12 +1100,16 @@ async function runTurn(prompt, session, containerInput) {
         const toolResults = await runToolCommands(commands);
         toolRounds += 1;
         const baseFollowup = `[Tool results from executed commands]\n\n${toolResults}\n\n` +
-            'Use these results to answer the user directly. If clone or another command failed, say so and quote stderr. Do not claim success unless tool output confirms it. Do not print tool commands unless another action is still required.';
+            '**Continue or finish:** If the user request is not fully satisfied yet (more files to read, CSS/JS/HTML not yet changed, git work incomplete, tests not run, etc.), your **next reply must include more executable tool lines** on their own lines or in `backticks` — do not end with only a plan, bullet roadmap, or "I will next…" without tools.\n' +
+            'When the request **is** fully satisfied, answer in plain language **without** further tool lines.\n' +
+            'If any command failed, your user-facing reply MUST include a "Tool failures" section with: exact command, stderr/error excerpt, and what you will run next to fix it. Do not claim success unless tool output confirms it.\n' +
+            'When tool output includes a `[Git outcome snapshot ...]` block, treat it as the source of truth for commit/push status. Do not contradict it.\n' +
+            'If that snapshot shows a clean tree and no ahead commits, report "no new changes to commit/push" (not a commit failure).';
         if (toolRounds >= MAX_TOOL_ROUNDS) {
             session.messages.push({
                 role: 'user',
                 content: `${baseFollowup}\n\n` +
-                    '[System: tool round limit reached. Reply in plain language only summarizing what succeeded or failed above. Do not emit further git, workspace-git-clone, or workspace-* command lines.]',
+                    '[System: tool round limit reached. Summarize in plain language what succeeded or failed and what is **still unfinished** (if anything). Do not emit further git, workspace-git-clone, workspace-git-status, or workspace-* command lines.]',
             });
             reply = await queryOpenRouter(session, containerInput);
             session.messages.push({ role: 'assistant', content: reply });

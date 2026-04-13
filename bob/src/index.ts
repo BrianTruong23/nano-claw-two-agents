@@ -48,7 +48,11 @@ import {
   getMessagesSince,
   getNewMessages,
   getRouterState,
+  countCrossBotResponses,
+  hasCrossBotMention,
   hasCrossBotResponse,
+  isRoutingBanner,
+  isSubstantiveBotMessage,
   isGroupChat,
   initDatabase,
   setRegisteredGroup,
@@ -64,6 +68,7 @@ import { findChannel, formatMessages, formatOutbound } from './router.js';
 import {
   buildResearchModePrompt,
   classifyResearchMode,
+  formatResearchModeUserNotice,
   isResearchModeCommand,
   shouldAgentRunForResearchMode,
 } from './research-mode.js';
@@ -97,6 +102,19 @@ let sessions: Record<string, string> = {};
 let registeredGroups: Record<string, RegisteredGroup> = {};
 let lastAgentTimestamp: Record<string, string> = {};
 let messageLoopRunning = false;
+const bannerSentForCursor: Record<string, string> = {};
+const verifiedForMessage: Record<string, string> = {};
+// How many substantive cross-bot responses existed when Bob last verified.
+// If the count grows (Andy responded to a handoff), Bob re-verifies.
+const verifiedBotCount: Record<string, number> = {};
+// How many verification rounds Bob has done for the current user message.
+// Hard-capped at MAX_VERIFY_ROUNDS to avoid infinite handoff loops.
+const verifyRoundCount: Record<string, number> = {};
+const MAX_VERIFY_ROUNDS = 3;
+// Settle logic: track cross-bot response count per user-message cursor.
+// Bob waits until the count stabilises (same for two consecutive checks)
+// before starting verification, so late-arriving responses are included.
+const settledCrossBotCount: Record<string, number> = {};
 
 const channels: Channel[] = [];
 const queue = new GroupQueue();
@@ -194,6 +212,42 @@ function canMessageStartResearchMode(
   if (message.is_bot_message) return false;
   if (message.is_from_me) return true;
   return isTriggerAllowed(chatJid, message.sender, loadSenderAllowlist());
+}
+
+function isPrimaryFixHandoffMessage(message: NewMessage): boolean {
+  if (WAIT_FOR_BOT_RESPONSE) return false;
+  if (!message.is_bot_message || message.is_from_me) return false;
+  const mentionPattern = new RegExp(`@${ASSISTANT_NAME}\\b`, 'i');
+  return mentionPattern.test(message.content);
+}
+
+function shouldWaitForPrimaryResearchTurn(
+  modeDecision: ReturnType<typeof classifyResearchMode> | null,
+  newestHumanMsg: NewMessage | undefined,
+  chatJid: string,
+  isMainGroup: boolean,
+): boolean {
+  if (isMainGroup || !WAIT_FOR_BOT_RESPONSE) return false;
+  if (!modeDecision || !newestHumanMsg) return false;
+  const cursor = newestHumanMsg.timestamp || lastAgentTimestamp[chatJid] || '';
+
+  // Explicit @mention from the primary = proceed immediately
+  if (hasCrossBotMention(chatJid, cursor, ASSISTANT_NAME)) return false;
+
+  const count = countCrossBotResponses(chatJid, cursor);
+  if (count === 0) return true; // primary hasn't responded yet
+
+  // Settle: wait until the substantive-message count is stable across two
+  // consecutive polling cycles.  This gives the bridge time to sync any
+  // follow-up messages the primary posts shortly after its first reply.
+  const settleKey = `${chatJid}:${cursor}`;
+  if (settledCrossBotCount[settleKey] === count) {
+    delete settledCrossBotCount[settleKey];
+    return false; // count stable — proceed to verify
+  }
+
+  settledCrossBotCount[settleKey] = count;
+  return true; // count changed or first observation — wait one more cycle
 }
 
 function getAgentAuthProblem(): string | null {
@@ -301,10 +355,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // Nothing to respond to if every pending message is from this bot
+  if (missedMessages.every((m) => m.is_from_me)) {
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+    return true;
+  }
+
   const newestHumanMsg = [...missedMessages]
     .reverse()
     .find((m) => !m.is_from_me && !m.is_bot_message);
-  if (!WAIT_FOR_BOT_RESPONSE && !newestHumanMsg) {
+  const newestPrimaryHandoffMsg = [...missedMessages]
+    .reverse()
+    .find((m) => isPrimaryFixHandoffMessage(m));
+  if (!WAIT_FOR_BOT_RESPONSE && !newestHumanMsg && !newestPrimaryHandoffMsg) {
     lastAgentTimestamp[chatJid] =
       missedMessages[missedMessages.length - 1].timestamp;
     saveState();
@@ -328,8 +393,7 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     if (hasOther && !hasMine) return true;
   }
 
-  // Research modes (collaborate / verify / andy-only turns) apply only to
-  // multi-user groups (chats.is_group = 1), not 1:1 DMs.
+  // Research verify mode applies only to multi-user groups (chats.is_group = 1), not 1:1 DMs.
   const modeDecision =
     newestHumanMsg && isGroupChat(chatJid)
       ? classifyResearchMode(newestHumanMsg.content)
@@ -348,28 +412,17 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return true;
   }
 
-  // Secondary bot ordering: wait for the primary bot to respond first on no-trigger messages
-  if (!isMainGroup && WAIT_FOR_BOT_RESPONSE && OTHER_BOT_TRIGGERS.length > 0) {
-    const myPattern = getTriggerPattern(group.trigger);
-    const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
-    const hasMyTrigger = missedMessages.some(
-      (m) =>
-        !m.is_from_me && !m.is_bot_message && myPattern.test(m.content.trim()),
-    );
-    const hasOtherTrigger = missedMessages.some(
-      (m) =>
-        !m.is_from_me &&
-        !m.is_bot_message &&
-        otherPatterns.some((p) => p.test(m.content.trim())),
-    );
-    if (!hasMyTrigger && !hasOtherTrigger) {
-      const cursor =
-        newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
-      if (!hasCrossBotResponse(chatJid, cursor)) {
-        retryMessageCheckSoon(chatJid);
-        return true; // Primary bot hasn't responded yet — wait and poll again
-      }
-    }
+  // In research modes, secondary must always wait for the primary bot's reply.
+  if (
+    shouldWaitForPrimaryResearchTurn(
+      modeDecision,
+      newestHumanMsg,
+      chatJid,
+      isMainGroup,
+    )
+  ) {
+    retryMessageCheckSoon(chatJid);
+    return true;
   }
 
   // For non-main groups, check if trigger is required and present
@@ -380,13 +433,28 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
       (m) =>
         (triggerPattern.test(m.content.trim()) ||
           isResearchModeCommand(m.content) ||
-          canMessageStartResearchMode(m, group, chatJid)) &&
+          canMessageStartResearchMode(m, group, chatJid) ||
+          isPrimaryFixHandoffMessage(m)) &&
         (m.is_from_me || isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
     );
-    if (!hasTrigger) return true;
+    // Verifier: any new substantive cross-bot message is an implicit trigger
+    // (Andy responded — Bob must verify, no explicit trigger required)
+    const hasNewBotWork =
+      WAIT_FOR_BOT_RESPONSE &&
+      missedMessages.some(
+        (m) => !m.is_from_me && m.is_bot_message && isSubstantiveBotMessage(m.content),
+      );
+    if (!hasTrigger && !hasNewBotWork) return true;
   }
 
-  const formattedPrompt = formatMessages(missedMessages, TIMEZONE);
+  const substantiveMessages = missedMessages.filter(
+    (m) => !isRoutingBanner(m.content),
+  );
+  if (substantiveMessages.length === 0) {
+    retryMessageCheckSoon(chatJid);
+    return true;
+  }
+  const formattedPrompt = formatMessages(substantiveMessages, TIMEZONE);
   const prompt = modeDecision
     ? buildResearchModePrompt(
         formattedPrompt,
@@ -404,7 +472,12 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    {
+      group: group.name,
+      messageCount: missedMessages.length,
+      researchMode: modeDecision?.mode,
+      researchSource: modeDecision?.source,
+    },
     'Processing messages',
   );
 
@@ -416,6 +489,44 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     logger.error({ group: group.name }, 'Agent auth is not configured');
     await channel.sendMessage(chatJid, authProblem);
     return true;
+  }
+
+  const bannerKey = newestHumanMsg?.timestamp || missedMessages[missedMessages.length - 1].timestamp;
+
+  // Reset round counter when a new user message arrives
+  if (WAIT_FOR_BOT_RESPONSE && verifiedForMessage[chatJid] !== bannerKey) {
+    verifyRoundCount[chatJid] = 0;
+  }
+
+  // Secondary: skip if already verified AND no new responses, OR max rounds reached
+  if (WAIT_FOR_BOT_RESPONSE && verifiedForMessage[chatJid] === bannerKey) {
+    const currentBotCount = countCrossBotResponses(chatJid, bannerKey);
+    if (verifiedBotCount[chatJid] === currentBotCount) {
+      logger.debug({ group: group.name }, 'Already verified for this user message, skipping');
+      return true;
+    }
+    if ((verifyRoundCount[chatJid] || 0) >= MAX_VERIFY_ROUNDS) {
+      logger.info({ group: group.name, rounds: verifyRoundCount[chatJid] }, 'Max verify rounds reached, stopping');
+      return true;
+    }
+    logger.info(
+      { group: group.name, prev: verifiedBotCount[chatJid], now: currentBotCount, round: (verifyRoundCount[chatJid] || 0) + 1 },
+      'Primary sent new response after handoff — re-verifying',
+    );
+  }
+
+  if (modeDecision && isGroupChat(chatJid) && bannerSentForCursor[chatJid] !== bannerKey) {
+    bannerSentForCursor[chatJid] = bannerKey;
+    const banner = formatResearchModeUserNotice(
+      modeDecision,
+      ASSISTANT_NAME,
+      WAIT_FOR_BOT_RESPONSE,
+    );
+    try {
+      await channel.sendMessage(chatJid, banner);
+    } catch (err) {
+      logger.warn({ chatJid, err }, 'Failed to send research mode banner');
+    }
   }
 
   // Track idle timer for closing stdin when agent is idle
@@ -482,7 +593,21 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         { group: group.name },
         'Agent error after output was sent, skipping cursor rollback to prevent duplicates',
       );
+      if (WAIT_FOR_BOT_RESPONSE) {
+        verifiedForMessage[chatJid] = bannerKey;
+        verifiedBotCount[chatJid] = countCrossBotResponses(chatJid, bannerKey);
+        verifyRoundCount[chatJid] = (verifyRoundCount[chatJid] || 0) + 1;
+      }
       return true;
+    }
+    // Notify the user that something went wrong (instead of silent retry)
+    try {
+      await channel.sendMessage(
+        chatJid,
+        `⚠️ ${ASSISTANT_NAME} encountered an error processing your message. Retrying...`,
+      );
+    } catch {
+      /* best-effort */
     }
     // Roll back cursor so retries can re-process these messages
     lastAgentTimestamp[chatJid] = previousCursor;
@@ -494,6 +619,11 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
     return false;
   }
 
+  if (WAIT_FOR_BOT_RESPONSE) {
+    verifiedForMessage[chatJid] = bannerKey;
+    verifiedBotCount[chatJid] = countCrossBotResponses(chatJid, bannerKey);
+    verifyRoundCount[chatJid] = (verifyRoundCount[chatJid] || 0) + 1;
+  }
   return true;
 }
 
@@ -648,6 +778,9 @@ async function startMessageLoop(): Promise<void> {
           const isMainGroup = group.isMain === true;
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
 
+          // Skip if all new messages are from this bot — nothing to respond to
+          if (groupMessages.every((m) => m.is_from_me)) continue;
+
           // Prevent active containers from intercepting messages addressed to the other bot
           if (OTHER_BOT_TRIGGERS.length > 0) {
             const newestHumanMsg = [...groupMessages]
@@ -668,11 +801,17 @@ async function startMessageLoop(): Promise<void> {
               (m) =>
                 (triggerPattern.test(m.content.trim()) ||
                   isResearchModeCommand(m.content) ||
-                  canMessageStartResearchMode(m, group, chatJid)) &&
+                  canMessageStartResearchMode(m, group, chatJid) ||
+                  isPrimaryFixHandoffMessage(m)) &&
                 (m.is_from_me ||
                   isTriggerAllowed(chatJid, m.sender, allowlistCfg)),
             );
-            if (!hasTrigger) continue;
+            const hasNewBotWork =
+              WAIT_FOR_BOT_RESPONSE &&
+              groupMessages.some(
+                (m) => !m.is_from_me && m.is_bot_message && isSubstantiveBotMessage(m.content),
+              );
+            if (!hasTrigger && !hasNewBotWork) continue;
           }
 
           const newestHumanMsg = [...groupMessages]
@@ -707,37 +846,27 @@ async function startMessageLoop(): Promise<void> {
             continue;
           }
 
-          // Secondary bot ordering must also apply in the hot path where
-          // an active container can receive piped messages directly.
+          // In research modes, secondary must always wait for primary output,
+          // including the hot path where we can pipe to an active container.
           if (
-            !isMainGroup &&
-            WAIT_FOR_BOT_RESPONSE &&
-            OTHER_BOT_TRIGGERS.length > 0
+            shouldWaitForPrimaryResearchTurn(
+              modeDecision,
+              newestHumanMsg,
+              chatJid,
+              isMainGroup,
+            )
           ) {
-            const myPattern = getTriggerPattern(group.trigger);
-            const otherPatterns = OTHER_BOT_TRIGGERS.map(buildTriggerPattern);
-            const hasMyTrigger = groupMessages.some(
-              (m) =>
-                !m.is_from_me &&
-                !m.is_bot_message &&
-                myPattern.test(m.content.trim()),
-            );
-            const hasOtherTrigger = groupMessages.some(
-              (m) =>
-                !m.is_from_me &&
-                !m.is_bot_message &&
-                otherPatterns.some((p) => p.test(m.content.trim())),
-            );
-            if (!hasMyTrigger && !hasOtherTrigger) {
-              const newestHumanMsg = [...groupMessages]
-                .reverse()
-                .find((m) => !m.is_from_me && !m.is_bot_message);
-              const cursor =
-                newestHumanMsg?.timestamp || lastAgentTimestamp[chatJid] || '';
-              if (!hasCrossBotResponse(chatJid, cursor)) {
-                retryMessageCheckSoon(chatJid);
-                continue;
-              }
+            retryMessageCheckSoon(chatJid);
+            continue;
+          }
+
+          // Secondary: skip only if already verified AND no new responses, OR max rounds reached
+          const pipeVerifyKey = newestHumanMsg?.timestamp || groupMessages[groupMessages.length - 1]?.timestamp;
+          if (WAIT_FOR_BOT_RESPONSE && pipeVerifyKey && verifiedForMessage[chatJid] === pipeVerifyKey) {
+            const currentBotCount = countCrossBotResponses(chatJid, pipeVerifyKey);
+            if (verifiedBotCount[chatJid] === currentBotCount || (verifyRoundCount[chatJid] || 0) >= MAX_VERIFY_ROUNDS) {
+              logger.debug({ chatJid }, 'Already verified for this user message (pipe), skipping');
+              continue;
             }
           }
 
@@ -749,8 +878,15 @@ async function startMessageLoop(): Promise<void> {
             ASSISTANT_NAME,
             MAX_MESSAGES_PER_PROMPT,
           );
-          const messagesToSend =
+          const rawMessagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
+          const messagesToSend = rawMessagesToSend.filter(
+            (m) => !isRoutingBanner(m.content),
+          );
+          if (messagesToSend.length === 0) {
+            retryMessageCheckSoon(chatJid);
+            continue;
+          }
           const formattedBase = formatMessages(messagesToSend, TIMEZONE);
           const formatted = modeDecision
             ? buildResearchModePrompt(
@@ -760,6 +896,30 @@ async function startMessageLoop(): Promise<void> {
                 WAIT_FOR_BOT_RESPONSE,
               )
             : formattedBase;
+
+          const pipeBannerKey = newestHumanMsg?.timestamp || messagesToSend[messagesToSend.length - 1]?.timestamp;
+          if (
+            modeDecision &&
+            isGroupChat(chatJid) &&
+            queue.canPipeMessage(chatJid) &&
+            pipeBannerKey &&
+            bannerSentForCursor[chatJid] !== pipeBannerKey
+          ) {
+            bannerSentForCursor[chatJid] = pipeBannerKey;
+            const banner = formatResearchModeUserNotice(
+              modeDecision,
+              ASSISTANT_NAME,
+              WAIT_FOR_BOT_RESPONSE,
+            );
+            try {
+              await channel.sendMessage(chatJid, banner);
+            } catch (err) {
+              logger.warn(
+                { chatJid, err },
+                'Failed to send research mode banner (pipe)',
+              );
+            }
+          }
 
           if (queue.sendMessage(chatJid, formatted)) {
             logger.debug(
@@ -936,7 +1096,7 @@ async function main(): Promise<void> {
     } catch (e) {}
 
     try {
-      const workspaceDir = path.resolve(process.cwd(), '../workspace');
+      const workspaceDir = path.resolve(process.cwd(), '../common/host-coding-work');
       if (!fs.existsSync(workspaceDir)) {
         fs.mkdirSync(workspaceDir, { recursive: true });
       }
@@ -1002,7 +1162,7 @@ async function main(): Promise<void> {
     } catch (e) {}
 
     try {
-      const workspaceDir = path.resolve(process.cwd(), '../workspace');
+      const workspaceDir = path.resolve(process.cwd(), '../common/host-coding-work');
       if (!fs.existsSync(workspaceDir)) {
         fs.mkdirSync(workspaceDir, { recursive: true });
       }

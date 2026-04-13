@@ -64,6 +64,8 @@ const PASSTHROUGH_ENV_VARS = [
   'NANOCLAW_MODEL',
   'GITHUB_TOKEN',
   'GH_TOKEN',
+  'NANOCLAW_GIT_AUTHOR_NAME',
+  'NANOCLAW_GIT_AUTHOR_EMAIL',
 ] as const;
 const SECRET_ENV_VARS = new Set([
   'ANTHROPIC_AUTH_TOKEN',
@@ -364,6 +366,26 @@ async function buildContainerArgs(
       args.push('-e', `${envKey}=${value}`);
     }
   }
+
+  // Git reads GIT_AUTHOR_* / GIT_COMMITTER_* (not NANOCLAW_*). Agent-runner
+  // injects these when it runs git; Bash-invoked `git` only sees the container
+  // env, so export the same resolved identity here (mirrors agent-runner gitEnv).
+  const gitAuthorName =
+    process.env.NANOCLAW_GIT_AUTHOR_NAME?.trim() ||
+    process.env.GIT_AUTHOR_NAME?.trim() ||
+    'NanoClaw Agent';
+  const gitAuthorEmail =
+    process.env.NANOCLAW_GIT_AUTHOR_EMAIL?.trim() ||
+    process.env.GIT_AUTHOR_EMAIL?.trim() ||
+    'nanoclaw@localhost';
+  args.push('-e', `GIT_AUTHOR_NAME=${gitAuthorName}`);
+  args.push('-e', `GIT_COMMITTER_NAME=${gitAuthorName}`);
+  args.push('-e', `GIT_AUTHOR_EMAIL=${gitAuthorEmail}`);
+  args.push('-e', `GIT_COMMITTER_EMAIL=${gitAuthorEmail}`);
+  args.push('-e', 'GIT_TERMINAL_PROMPT=0');
+  args.push('-e', 'GIT_EDITOR=:');
+  args.push('-e', 'EDITOR=:');
+  args.push('-e', 'VISUAL=:');
 
   for (const mount of mounts) {
     if (mount.readonly) {

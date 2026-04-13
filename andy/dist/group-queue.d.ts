@@ -32,6 +32,12 @@ export declare class GroupQueue {
      */
     notifyIdle(groupJid: string): void;
     /**
+     * Whether {@link sendMessage} would accept a write right now (sync check).
+     * Used so we can post a user-visible banner only when piping, and avoid
+     * duplicating the banner in {@link processMessagesFn} when we enqueue instead.
+     */
+    canPipeMessage(groupJid: string): boolean;
+    /**
      * Send a follow-up message to the active container via IPC file.
      * Returns true if the message was written, false if no active container.
      */

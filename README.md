@@ -20,7 +20,7 @@ It aims to seamlessly bridge the gap between distinct agent runtimes, allowing f
 
 * `andy/` — NanoClaw instance for the "Andy" agent (`npm run build` / `node dist/index.js` from this directory).
 * `bob/` — NanoClaw instance for "Bob", same layout as `andy/`.
-* `common/` — Repo-local shared directory (`nano-claw-agents/common/`) bind-mounted as `/workspace/common` in both agent containers. (Paths are resolved from `andy/` / `bob/` as one level up, not under `Documents/common`.)
+* `common/` — Repo-local shared directory (`nano-claw-agents/common/`) bind-mounted as `/workspace/common` in both agent containers (Andy/Bob collaboration). Telegram-triggered **host** runs for `/codex` and `/claude` also use `common/host-coding-work/` as their working directory so you only maintain one top-level mutable tree. (Paths are resolved from `andy/` / `bob/` as one level up, not under `Documents/common`.)
 * `start.sh` — Orchestrates agents and the bot bridge. On each **stop** (or before a fresh **start** after killing stale PIDs), logs in `logs/*.log` that exceed **64KiB** are trimmed by removing the **oldest ~50%** of bytes (newest half kept). Use `./start.sh logs-clean` for a **full** truncate when you want empty logs. Override the threshold with `MIN_LOG_TRIM_BYTES`.
 
 ## 🛠 Active Tool Capabilities
@@ -38,3 +38,16 @@ Out-of-the-box, both agents are equipped with advanced node execution layers cap
 2. Ensure Docker or Podman is locally available to host the execution sandboxes.
 3. Launch the environment cleanly via `./start.sh`.
 4. Drop your instructions directly into the designated chat bridge and let Andy and Bob take over!
+
+### Git commits from containers (author + push)
+
+Agent containers do not read your laptop’s `git config --global`. To avoid **“Author identity unknown”** on `git commit`, set in **both** `andy/.env` and `bob/.env` (then restart `./start.sh`):
+
+- `NANOCLAW_GIT_AUTHOR_NAME=Your Name`
+- `NANOCLAW_GIT_AUTHOR_EMAIL=you@example.com` (GitHub’s **noreply** address from *Settings → Emails* is fine)
+
+These are passed into the container with `GITHUB_TOKEN` / `GH_TOKEN`. If omitted, commits use built-in defaults so commits still run.
+
+**GitHub.com account:** sign up at [https://github.com/signup](https://github.com/signup). **API access for pushes:** create a Personal Access Token with `repo` scope and set `GITHUB_TOKEN` (or `GH_TOKEN`) in each agent `.env`.
+
+Routing hints for verify groups live in `andy/src/research-mode.ts` and `bob/src/research-mode.ts` (primary: commit+push when done; secondary: short verify + @ handoff on errors). The **`github`** skill under `andy/container/skills/github/` and `bob/container/skills/github/` is copied into each group’s container skills on startup.

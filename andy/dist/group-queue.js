@@ -123,6 +123,15 @@ export class GroupQueue {
         }
     }
     /**
+     * Whether {@link sendMessage} would accept a write right now (sync check).
+     * Used so we can post a user-visible banner only when piping, and avoid
+     * duplicating the banner in {@link processMessagesFn} when we enqueue instead.
+     */
+    canPipeMessage(groupJid) {
+        const state = this.getGroup(groupJid);
+        return Boolean(state.active && state.groupFolder && !state.isTaskContainer);
+    }
+    /**
      * Send a follow-up message to the active container via IPC file.
      * Returns true if the message was written, false if no active container.
      */

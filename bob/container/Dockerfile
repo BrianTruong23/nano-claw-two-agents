@@ -26,12 +26,30 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Git ≥ 2.41 honors GIT_CONFIG_GLOBAL (entrypoint sets identity in /tmp). Debian
+# bookworm’s default git is older; upgrade from backports when available.
+RUN set -eu; \
+  . /etc/os-release; \
+  echo "deb http://deb.debian.org/debian ${VERSION_CODENAME}-backports main contrib non-free-firmware" > /etc/apt/sources.list.d/backports.list; \
+  apt-get update; \
+  apt-get install -y -t "${VERSION_CODENAME}-backports" git || true; \
+  git --version
+
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install GitHub CLI (gh) for github-ops skill
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install agent-browser, claude-code, and document-processing libraries globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code \
+    pdf-lib pdf-parse docx mammoth exceljs
 
 # Create app directory
 WORKDIR /app
@@ -51,11 +69,11 @@ RUN npm run build
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-# Create entrypoint script
 # Container input (prompt, group info) is passed via stdin JSON.
 # Credentials are injected by the host's credential proxy — never passed here.
 # Follow-up messages arrive via IPC files in /workspace/ipc/input/
-RUN printf '#!/bin/bash\nset -e\ncd /app && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/node_modules /tmp/dist/node_modules\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Set ownership to node user (non-root) for writable directories
 RUN chown -R node:node /workspace && chmod 777 /home/node

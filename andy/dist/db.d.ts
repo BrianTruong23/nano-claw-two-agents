@@ -9,6 +9,8 @@ export declare function _closeDatabase(): void;
  * Used for all chats to enable group discovery without storing sensitive content.
  */
 export declare function storeChatMetadata(chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean): void;
+/** True when chat metadata marks this JID as a multi-user group (not a 1:1 DM). */
+export declare function isGroupChat(chatJid: string): boolean;
 /**
  * Update chat name without changing timestamp for existing chats.
  * New chats get the current time as their initial timestamp.
@@ -57,7 +59,36 @@ export declare function getNewMessages(jids: string[], lastTimestamp: string, bo
     newTimestamp: string;
 };
 export declare function getMessagesSince(chatJid: string, sinceTimestamp: string, botPrefix: string, limit?: number): NewMessage[];
+/**
+ * Strip the bridge context prefix so we can inspect the original message content.
+ */
+export declare function stripBridgePrefix(content: string): string;
+/**
+ * True when the content is just a routing/mode banner (no substantive work).
+ * Handles both raw messages and bridge-prefixed messages.
+ */
+export declare function isRoutingBanner(content: string): boolean;
+/**
+ * True when cross-bot content represents actual work output worth verifying —
+ * not a routing banner, not empty, and has meaningful length.
+ */
+export declare function isSubstantiveBotMessage(content: string): boolean;
+/**
+ * Check whether the other bot has posted a substantive (non-banner) response
+ * since the given cursor. Used by the secondary to know when the primary
+ * has actually answered and is ready for verification.
+ */
 export declare function hasCrossBotResponse(chatJid: string, sinceTimestamp: string): boolean;
+/**
+ * Count the number of substantive cross-bot messages since the cursor.
+ * Used by the settle logic to detect when the primary has stopped producing output.
+ */
+export declare function countCrossBotResponses(chatJid: string, sinceTimestamp: string): number;
+/**
+ * Check whether the other bot explicitly requested verification via @mention.
+ * E.g. Andy's response contains "@Bob" to ask Bob to verify.
+ */
+export declare function hasCrossBotMention(chatJid: string, sinceTimestamp: string, myName: string): boolean;
 export declare function getLastBotMessageTimestamp(chatJid: string, botPrefix: string): string | undefined;
 export declare function createTask(task: Omit<ScheduledTask, 'last_run' | 'last_result'>): void;
 export declare function getTaskById(id: string): ScheduledTask | undefined;

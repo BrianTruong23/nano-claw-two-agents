@@ -35,10 +35,7 @@ Thumbs.db
 *.sqlite
 *.sqlite3
 
-# Shared Code Workspace
-workspace/
-
-# Shared bind-mount directory (Andy/Bob); ignore entire tree
+# Shared bind-mount directory (Andy/Bob); ignore entire tree (includes host-coding-work for /codex /claude)
 common/
 
 .gitignore

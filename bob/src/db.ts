@@ -399,13 +399,75 @@ export function getMessagesSince(
     .all(chatJid, sinceTimestamp, `${botPrefix}:%`, limit) as NewMessage[];
 }
 
+// Matches the bridge prefix that bot-bridge.sh prepends to cross-bot messages
+const XBOT_CONTEXT_PREFIX_RE = /^\[Context from \w+ bot[^\]]*\]\s*/i;
+// Matches routing banners in any mode (verify, collaborate, etc.)
+const ROUTING_BANNER_RE = /^⏵\s+\*\*/;
+
+/**
+ * Strip the bridge context prefix so we can inspect the original message content.
+ */
+export function stripBridgePrefix(content: string): string {
+  return content.trim().replace(XBOT_CONTEXT_PREFIX_RE, '');
+}
+
+/**
+ * True when the content is just a routing/mode banner (no substantive work).
+ * Handles both raw messages and bridge-prefixed messages.
+ */
+export function isRoutingBanner(content: string): boolean {
+  const cleaned = stripBridgePrefix(content);
+  return ROUTING_BANNER_RE.test(cleaned);
+}
+
+/**
+ * True when cross-bot content represents actual work output worth verifying —
+ * not a routing banner, not empty, and has meaningful length.
+ */
+export function isSubstantiveBotMessage(content: string): boolean {
+  if (isRoutingBanner(content)) return false;
+  const cleaned = stripBridgePrefix(content);
+  return cleaned.length > 10;
+}
+
+/**
+ * Check whether the other bot has posted a substantive (non-banner) response
+ * since the given cursor. Used by the secondary to know when the primary
+ * has actually answered and is ready for verification.
+ */
 export function hasCrossBotResponse(chatJid: string, sinceTimestamp: string): boolean {
-  const row = db
+  return countCrossBotResponses(chatJid, sinceTimestamp) > 0;
+}
+
+/**
+ * Count the number of substantive cross-bot messages since the cursor.
+ * Used by the settle logic to detect when the primary has stopped producing output.
+ */
+export function countCrossBotResponses(chatJid: string, sinceTimestamp: string): number {
+  const rows = db
     .prepare(
-      `SELECT 1 FROM messages WHERE chat_jid = ? AND id LIKE 'xbot_%' AND timestamp > ? LIMIT 1`,
+      `SELECT content FROM messages WHERE chat_jid = ? AND id LIKE 'xbot_%' AND timestamp > ?`,
     )
-    .get(chatJid, sinceTimestamp);
-  return !!row;
+    .all(chatJid, sinceTimestamp) as Array<{ content: string }>;
+  return rows.filter((r) => isSubstantiveBotMessage(r.content)).length;
+}
+
+/**
+ * Check whether the other bot explicitly requested verification via @mention.
+ * E.g. Andy's response contains "@Bob" to ask Bob to verify.
+ */
+export function hasCrossBotMention(
+  chatJid: string,
+  sinceTimestamp: string,
+  myName: string,
+): boolean {
+  const rows = db
+    .prepare(
+      `SELECT content FROM messages WHERE chat_jid = ? AND id LIKE 'xbot_%' AND timestamp > ?`,
+    )
+    .all(chatJid, sinceTimestamp) as Array<{ content: string }>;
+  const mentionRe = new RegExp(`@${myName}\\b`, 'i');
+  return rows.some((r) => isSubstantiveBotMessage(r.content) && mentionRe.test(r.content));
 }
 
 export function getLastBotMessageTimestamp(
