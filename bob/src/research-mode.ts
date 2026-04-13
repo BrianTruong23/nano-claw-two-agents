@@ -72,6 +72,22 @@ export function formatResearchModeUserNotice(
   return `⏵ **verify** (${srcLabel}) · ${roleHint}`;
 }
 
+/**
+ * Whether the **user's ask** (not bot follow-ups) sounds like they care about
+ * git/repo/branch state. Used to suppress the machine git footer on pure
+ * download / search / paper tasks.
+ */
+export function humanWantsGitMachineReport(
+  researchCleanedText: string | null | undefined,
+  fallbackHumanText: string | null | undefined,
+): boolean {
+  const raw = (researchCleanedText?.trim() || fallbackHumanText?.trim() || '');
+  if (!raw) return false;
+  return /\b(git|github|commit|commits|push|pull|merge|rebase|branch|branches|pull request|\bpr\b|repository|\brepo\b|stash|staging|remote|upstream|checkout|worktree)\b/i.test(
+    raw,
+  );
+}
+
 export function buildResearchModePrompt(
   formattedMessages: string,
   decision: ResearchModeDecision,
@@ -98,6 +114,7 @@ function getRoleInstruction(
   if (isSecondary) {
     return [
       `${assistantName}: verify the primary assistant's last answer only — do not redo their work or summarize their plan.`,
+      'The transcript below is trimmed to start at the **latest human message** for this turn. Ignore earlier bot threads or old @-mentions about a **different** task (e.g. another folder or PDF name) unless the primary explicitly tied them to this reply.',
       'If it looks correct for the user request, reply in **at most 2 short sentences** (or ~400 characters): confirm + any critical caveat only.',
       'If something is materially wrong, or a tool failed (git, workspace, etc.), start with `@Andy` (or the primary name in this chat) and state what broke in plain language so the primary can do one more fix pass; after that follow-up, accept the result as final for this turn.',
       'Do not re-read files the primary assistant already quoted unless you dispute a specific claim; do not propose new "next steps" unless fixing an error.',
@@ -105,10 +122,10 @@ function getRoleInstruction(
   }
 
   return [
-    `${assistantName}: you are the primary assistant — carry the user request through to completion (branch, reads, edits, **commit + push**) before stopping.`,
-    'After substantive edits under /workspace/common: `git add`, `git commit -m "..."`, then `github push` with the correct repo path — treat that as part of "done" unless the user explicitly asked not to push.',
-    'Use tools until the job is done, not after one file preview: if the user named paths under /workspace/common, use github/git with those paths or the single shared clone auto-target.',
+    `${assistantName}: you are the primary assistant — carry the user request through to completion (reads, edits, downloads, searches) before stopping.`,
+    '**Git commit / push:** only when the user asked for repo work (branch, PR, commit, push, merge, "save to git") or they clearly want changes persisted on the remote. For pure Q&A, browsing, PDF/paper downloads, or "get me a file" without git language, finish with the files in `/workspace/common` and **do not** add a commit/push workflow unless they asked for it.',
+    'Use tools until the job is done, not after one file preview: if the user named paths under /workspace/common, use workspace-list/read (and git/github only when the ask is repo-related). Prefer `web-search` + `workspace-download` over long `agent-browser` chains for public PDFs. **Do not `workspace-git-clone` a GitHub project** when the user only asked for a PDF or paper — cloning is not a download.',
     'Do not stop on the first clarifying question unless you are truly blocked; prefer sensible defaults and continue.',
-    'Keep the reply complete enough that the secondary assistant can verify in a short note.',
+    'Keep the reply complete enough that the secondary assistant can verify in a short note (paths, filenames).',
   ].join(' ');
 }

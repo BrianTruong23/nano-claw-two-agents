@@ -42,6 +42,10 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  /** True when this instance is the secondary verifier (research / dual-bot). */
+  verifierMode?: boolean;
+  /** When false, agent-runner omits the machine git footer (non-repo user asks). */
+  gitMachineReportWanted?: boolean;
   script?: string;
 }
 
@@ -66,11 +70,20 @@ const PASSTHROUGH_ENV_VARS = [
   'GH_TOKEN',
   'NANOCLAW_GIT_AUTHOR_NAME',
   'NANOCLAW_GIT_AUTHOR_EMAIL',
+  'BRAVE_SEARCH_API_KEY',
+  'BRAVE_SEARCH_LANG',
+  'BRAVE_SEARCH_UI_LANG',
+  'BRAVE_SEARCH_COUNTRY',
+  'BRAVE_SEARCH_COUNT',
+  'BRAVE_SEARCH_APPEND_ACADEMIC',
+  'BRAVE_SEARCH_DUAL_ACADEMIC',
+  'NANOCLAW_PROGRESS_INTERVAL',
 ] as const;
 const SECRET_ENV_VARS = new Set([
   'ANTHROPIC_AUTH_TOKEN',
   'GITHUB_TOKEN',
   'GH_TOKEN',
+  'BRAVE_SEARCH_API_KEY',
 ]);
 const CONTAINER_NODE_UID = 1000;
 const CONTAINER_NODE_GID = 1000;

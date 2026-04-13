@@ -403,6 +403,8 @@ export function getMessagesSince(
 const XBOT_CONTEXT_PREFIX_RE = /^\[Context from \w+ bot[^\]]*\]\s*/i;
 // Matches routing banners in any mode (verify, collaborate, etc.)
 const ROUTING_BANNER_RE = /^⏵\s+\*\*/;
+// Interim progress pings from the agent-runner (must not unlock verifier settle logic)
+const PROGRESS_PING_RE = /^⏳\s+\*\*progress\*\*/i;
 
 /**
  * Strip the bridge context prefix so we can inspect the original message content.
@@ -420,12 +422,18 @@ export function isRoutingBanner(content: string): boolean {
   return ROUTING_BANNER_RE.test(cleaned);
 }
 
+export function isProgressPing(content: string): boolean {
+  const cleaned = stripBridgePrefix(content);
+  return PROGRESS_PING_RE.test(cleaned);
+}
+
 /**
  * True when cross-bot content represents actual work output worth verifying —
  * not a routing banner, not empty, and has meaningful length.
  */
 export function isSubstantiveBotMessage(content: string): boolean {
   if (isRoutingBanner(content)) return false;
+  if (isProgressPing(content)) return false;
   const cleaned = stripBridgePrefix(content);
   return cleaned.length > 10;
 }

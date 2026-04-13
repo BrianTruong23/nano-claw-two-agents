@@ -50,6 +50,7 @@ import {
   getRouterState,
   hasCrossBotResponse,
   isRoutingBanner,
+  isProgressPing,
   isGroupChat,
   initDatabase,
   setRegisteredGroup,
@@ -66,6 +67,7 @@ import {
   buildResearchModePrompt,
   classifyResearchMode,
   formatResearchModeUserNotice,
+  humanWantsGitMachineReport,
   isResearchModeCommand,
   shouldAgentRunForResearchMode,
 } from './research-mode.js';
@@ -403,13 +405,25 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   }
 
   const substantiveMessages = missedMessages.filter(
-    (m) => !isRoutingBanner(m.content),
+    (m) => !isRoutingBanner(m.content) && !isProgressPing(m.content),
   );
   if (substantiveMessages.length === 0) {
     retryMessageCheckSoon(chatJid);
     return true;
   }
-  const formattedPrompt = formatMessages(substantiveMessages, TIMEZONE);
+  let messagesForPrompt = substantiveMessages;
+  if (
+    WAIT_FOR_BOT_RESPONSE &&
+    newestHumanMsg &&
+    modeDecision &&
+    isGroupChat(chatJid)
+  ) {
+    const idx = substantiveMessages.findIndex(
+      (m) => m.timestamp === newestHumanMsg.timestamp,
+    );
+    if (idx >= 0) messagesForPrompt = substantiveMessages.slice(idx);
+  }
+  const formattedPrompt = formatMessages(messagesForPrompt, TIMEZONE);
   const prompt = modeDecision
     ? buildResearchModePrompt(
         formattedPrompt,
@@ -418,6 +432,10 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         WAIT_FOR_BOT_RESPONSE,
       )
     : formattedPrompt;
+  const gitMachineReportWanted = humanWantsGitMachineReport(
+    modeDecision?.cleanedContent ?? null,
+    newestHumanMsg?.content ?? null,
+  );
 
   // Advance cursor so the piping path in startMessageLoop won't re-fetch
   // these messages. Save the old cursor so we can roll back on error.
@@ -483,32 +501,38 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let hadError = false;
   let outputSentToUser = false;
 
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
-    if (result.result) {
-      const raw =
-        typeof result.result === 'string'
-          ? result.result
-          : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
+  const output = await runAgent(
+    group,
+    prompt,
+    chatJid,
+    async (result) => {
+      // Streaming output callback — called for each agent result
+      if (result.result) {
+        const raw =
+          typeof result.result === 'string'
+            ? result.result
+            : JSON.stringify(result.result);
+        // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
+        const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+        logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
+        if (text) {
+          await channel.sendMessage(chatJid, text);
+          outputSentToUser = true;
+        }
+        // Only reset idle timer on actual results, not session-update markers (result: null)
+        resetIdleTimer();
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
-      resetIdleTimer();
-    }
 
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
+      if (result.status === 'success') {
+        queue.notifyIdle(chatJid);
+      }
 
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+      if (result.status === 'error') {
+        hadError = true;
+      }
+    },
+    { gitMachineReportWanted },
+  );
 
   try {
     await channel.setTyping?.(chatJid, false);
@@ -559,6 +583,7 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  opts?: { gitMachineReportWanted?: boolean },
 ): Promise<'success' | 'error'> {
   lastRunError = '';
   const isMain = group.isMain === true;
@@ -611,6 +636,8 @@ async function runAgent(
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        verifierMode: WAIT_FOR_BOT_RESPONSE,
+        gitMachineReportWanted: opts?.gitMachineReportWanted,
       },
       (proc, containerName) =>
         queue.registerProcess(chatJid, proc, containerName, group.folder),
@@ -796,7 +823,7 @@ async function startMessageLoop(): Promise<void> {
           const rawMessagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
           const messagesToSend = rawMessagesToSend.filter(
-            (m) => !isRoutingBanner(m.content),
+            (m) => !isRoutingBanner(m.content) && !isProgressPing(m.content),
           );
           if (messagesToSend.length === 0) {
             retryMessageCheckSoon(chatJid);
