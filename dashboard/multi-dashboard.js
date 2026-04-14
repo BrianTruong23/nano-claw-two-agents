@@ -18,6 +18,8 @@ const PORT = Number.parseInt(process.env.NANOCLAW_MULTI_DASHBOARD_PORT || '4790'
 
 const ANDY_RUNTIME = path.join(REPO_ROOT, 'andy', 'data', 'dashboard', 'runtime-status.json');
 const BOB_RUNTIME = path.join(REPO_ROOT, 'bob', 'data', 'dashboard', 'runtime-status.json');
+const ANDY_EVENTS = path.join(REPO_ROOT, 'andy', 'data', 'dashboard', 'events.jsonl');
+const BOB_EVENTS = path.join(REPO_ROOT, 'bob', 'data', 'dashboard', 'events.jsonl');
 
 function readJson(filePath) {
   try {
@@ -61,10 +63,85 @@ function readAllowlistSummary() {
   };
 }
 
+function readTailJsonl(filePath, maxLines = 12) {
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const lines = fs
+      .readFileSync(filePath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .slice(-maxLines);
+    return lines.map((l) => JSON.parse(l));
+  } catch {
+    return [];
+  }
+}
+
+function agentHealth(runtime, ageMs) {
+  if (!runtime) return { ok: false, reason: 'no runtime-status.json' };
+  if (runtime.status !== 'running')
+    return { ok: false, reason: `status=${runtime.status}` };
+  if (ageMs == null) return { ok: false, reason: 'unknown heartbeat age' };
+  if (ageMs > 15000) return { ok: false, reason: `heartbeat stale (${Math.round(ageMs / 1000)}s)` };
+  const channels = Array.isArray(runtime.channels) ? runtime.channels : [];
+  if (channels.length > 0 && channels.every((c) => c && c.connected === false)) {
+    return { ok: false, reason: 'no connected channels' };
+  }
+  return { ok: true, reason: 'healthy' };
+}
+
+function computeBacklog(runtime) {
+  const q = runtime?.queue || {};
+  const groups = q.groups || {};
+  let pendingMessages = 0;
+  let pendingTasks = 0;
+  let activeGroups = 0;
+  let retrying = 0;
+  for (const v of Object.values(groups)) {
+    if (!v) continue;
+    if (v.active) activeGroups += 1;
+    if (v.pendingMessages) pendingMessages += 1;
+    pendingTasks += Number(v.pendingTaskCount || 0);
+    if ((v.retryCount || 0) > 0) retrying += 1;
+  }
+  return {
+    activeCount: q.activeCount ?? activeGroups,
+    waitingGroups: Array.isArray(q.waitingGroups) ? q.waitingGroups.length : 0,
+    pendingMessagesGroups: pendingMessages,
+    pendingTaskCount: pendingTasks,
+    retryingGroups: retrying,
+  };
+}
+
+function computeNextAction(runtime) {
+  if (!runtime) return 'Start agent to populate runtime status';
+  const q = runtime.queue || {};
+  const groups = q.groups || {};
+  const active = Object.entries(groups).find(([, v]) => v && v.active);
+  if (active) {
+    const [jid, v] = active;
+    if (v.isTaskContainer && v.runningTaskId) return `Running task ${v.runningTaskId} (${jid})`;
+    if (v.containerName) return `Running container ${v.containerName} (${jid})`;
+    return `Working (${jid})`;
+  }
+  const hasPendingMsg = Object.values(groups).some((v) => v && v.pendingMessages);
+  if (hasPendingMsg) return 'Pending messages: will process next poll';
+  const hasPendingTasks = Object.values(groups).some((v) => v && (v.pendingTaskCount || 0) > 0);
+  if (hasPendingTasks) return 'Pending tasks: will schedule/run next';
+  const waiting = Array.isArray(q.waitingGroups) ? q.waitingGroups.length : 0;
+  if (waiting > 0) return `Waiting groups queued (${waiting})`;
+  return 'Idle';
+}
+
 function snapshot() {
   const allowlists = readAllowlistSummary();
   const andy = readJson(ANDY_RUNTIME);
   const bob = readJson(BOB_RUNTIME);
+  const andyAge = fileAgeMs(ANDY_RUNTIME);
+  const bobAge = fileAgeMs(BOB_RUNTIME);
+  const andyEvents = readTailJsonl(ANDY_EVENTS, 12);
+  const bobEvents = readTailJsonl(BOB_EVENTS, 12);
   return {
     at: new Date().toISOString(),
     repoRoot: REPO_ROOT,
@@ -72,13 +149,21 @@ function snapshot() {
     agents: {
       andy: {
         runtimePath: ANDY_RUNTIME,
-        runtimeAgeMs: fileAgeMs(ANDY_RUNTIME),
+        runtimeAgeMs: andyAge,
         runtime: andy,
+        health: agentHealth(andy, andyAge),
+        backlog: computeBacklog(andy),
+        nextAction: computeNextAction(andy),
+        recentEvents: andyEvents,
       },
       bob: {
         runtimePath: BOB_RUNTIME,
-        runtimeAgeMs: fileAgeMs(BOB_RUNTIME),
+        runtimeAgeMs: bobAge,
         runtime: bob,
+        health: agentHealth(bob, bobAge),
+        backlog: computeBacklog(bob),
+        nextAction: computeNextAction(bob),
+        recentEvents: bobEvents,
       },
     },
   };
@@ -119,6 +204,11 @@ const page = `<!doctype html>
       .muted { opacity: .75; }
       .k { opacity: .75; }
       .grid { display: grid; grid-template-columns: 140px 1fr; gap: 6px 10px; margin-top: 10px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .events { margin-top: 10px; border-top: 1px solid rgba(127,127,127,.25); padding-top: 10px; }
+      .event { display:flex; gap:8px; margin: 4px 0; }
+      .event .t { width: 84px; opacity:.75; }
+      .event .m { flex:1; }
       code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
       .small { font-size: 12px; }
       details > summary { cursor: pointer; }
@@ -187,9 +277,11 @@ const page = `<!doctype html>
         const raw = el(rawId);
         const rt = agent.runtime;
         const age = agent.runtimeAgeMs;
-        const isHealthy = rt && rt.status === 'running' && age != null && age < 15000;
+        const isHealthy = agent.health && agent.health.ok === true;
 
-        status.textContent = rt ? (rt.status + (age != null ? (" · heartbeat " + fmtMs(age) + " ago") : "")) : "no runtime-status.json";
+        status.textContent = rt
+          ? (rt.status + (age != null ? (" · heartbeat " + fmtMs(age) + " ago") : "") + (agent.health ? (" · " + agent.health.reason) : ""))
+          : "no runtime-status.json";
         pill(status, isHealthy);
 
         if (!rt) {
@@ -203,14 +295,29 @@ const page = `<!doctype html>
         const waiting = (q.waitingGroups || []).slice(0, 6).join(", ");
         const groups = q.groups || {};
         const active = Object.entries(groups).filter(([,v]) => v && v.active).map(([k]) => k).slice(0, 6).join(", ");
+        const backlog = agent.backlog || {};
+        const nextAction = agent.nextAction || "n/a";
+        const events = Array.isArray(agent.recentEvents) ? agent.recentEvents.slice(-6).reverse() : [];
 
         grid.innerHTML =
           kv("pid", String(rt.pid)) +
           kv("default trigger", "<code>" + (rt.defaultTrigger || "") + "</code>") +
           kv("channels", (rt.channels || []).map(c => c.name + (c.connected ? "✓" : "×")).join(", ") || "none") +
           kv("queue", "active=" + (q.activeCount ?? 0) + ", waiting=" + ((q.waitingGroups || []).length)) +
+          kv("backlog", "pendingMsgs(groups)=" + (backlog.pendingMessagesGroups ?? 0) + ", pendingTasks=" + (backlog.pendingTaskCount ?? 0)) +
+          kv("next action", "<span class='mono'>" + nextAction.replace(/</g, "&lt;") + "</span>") +
           kv("active groups", active || "<span class='muted'>none</span>") +
-          kv("waiting groups", waiting || "<span class='muted'>none</span>");
+          kv("waiting groups", waiting || "<span class='muted'>none</span>") +
+          '<div class="events" style="grid-column:1 / -1">' +
+            '<div class="h" style="font-size:13px; margin-bottom:6px">Recent events</div>' +
+            (events.length ? events.map(e => {
+              const t = (e.at || "").slice(11,19);
+              const level = (e.level || "").toUpperCase();
+              const msg = (e.msg || "");
+              const group = e.data && e.data.group ? (" · " + e.data.group) : "";
+              return '<div class="event"><div class="t">' + t + '</div><div class="m"><span class="pill">' + level + '</span> ' + msg.replace(/</g, "&lt;") + '<span class="muted">' + group.replace(/</g, "&lt;") + '</span></div></div>';
+            }).join("") : "<div class=\"muted small\">No events yet.</div>") +
+          '</div>';
 
         raw.textContent = JSON.stringify(rt, null, 2);
       }
