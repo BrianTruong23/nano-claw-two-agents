@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SCRIPT_DIR
 LOG_DIR="$SCRIPT_DIR/logs"
 PID_FILE="$SCRIPT_DIR/.agents.pid"
 mkdir -p "$LOG_DIR"
@@ -10,6 +11,8 @@ mkdir -p "$LOG_DIR"
 # at 50,000 bytes by dropping the oldest bytes and keeping the newest tail.
 LOG_MAX_BYTES="${LOG_MAX_BYTES:-50000}"
 LOG_TRIM_INTERVAL_SECONDS="${LOG_TRIM_INTERVAL_SECONDS:-30}"
+CONVERSATION_RETENTION_DAYS="${CONVERSATION_RETENTION_DAYS:-5}"
+CONVERSATION_CLEAN_INTERVAL_SECONDS="${CONVERSATION_CLEAN_INTERVAL_SECONDS:-86400}"
 
 trim_orchestration_logs_to_cap() {
   shopt -s nullglob
@@ -36,9 +39,61 @@ trim_orchestration_logs_to_cap() {
   shopt -u nullglob
 }
 
+cleanup_conversation_archives() {
+  python3 - <<'PY'
+import os, time
+
+repo = os.environ.get("SCRIPT_DIR") or os.getcwd()
+days_raw = os.environ.get("CONVERSATION_RETENTION_DAYS", "5")
+try:
+    days = int(days_raw)
+except Exception:
+    days = 5
+days = max(0, days)
+cutoff = time.time() - (days * 86400)
+
+deleted = 0
+scanned = 0
+
+for agent in ("andy", "bob"):
+    base = os.path.join(repo, agent, "groups")
+    if not os.path.isdir(base):
+        continue
+    for root, dirs, files in os.walk(base):
+        # Only operate on .../groups/<folder>/conversations
+        if os.path.basename(root) != "conversations":
+            continue
+        for name in files:
+            if not name.endswith(".md"):
+                continue
+            path = os.path.join(root, name)
+            scanned += 1
+            try:
+                st = os.stat(path)
+            except FileNotFoundError:
+                continue
+            # Delete if older than cutoff by mtime.
+            if st.st_mtime < cutoff:
+                try:
+                    os.remove(path)
+                    deleted += 1
+                except Exception:
+                    pass
+
+print(f"Conversation cleanup: scanned={scanned} deleted={deleted} retention_days={days}")
+PY
+}
+
 start_log_trimmer_loop() {
+  local last_conv_clean=0
   while true; do
     trim_orchestration_logs_to_cap || true
+    now=$(date +%s)
+    if (( now - last_conv_clean >= CONVERSATION_CLEAN_INTERVAL_SECONDS )); then
+      # Best-effort cleanup; never fail the loop.
+      cleanup_conversation_archives || true
+      last_conv_clean=$now
+    fi
     sleep "$LOG_TRIM_INTERVAL_SECONDS"
   done
 }
@@ -104,6 +159,8 @@ if [[ "${1:-}" == "stop" ]]; then
   pkill -f "bot-bridge.sh" 2>/dev/null || true
   echo "Trimming logs to ${LOG_MAX_BYTES} bytes per file…"
   trim_orchestration_logs_to_cap || true
+echo "Cleaning conversation archives older than ${CONVERSATION_RETENTION_DAYS} days…"
+cleanup_conversation_archives || true
   exit 0
 fi
 
@@ -122,6 +179,8 @@ pkill -f "bot-bridge.sh" 2>/dev/null || true
 sleep 1
 echo "Trimming logs to ${LOG_MAX_BYTES} bytes per file…"
 trim_orchestration_logs_to_cap || true
+echo "Cleaning conversation archives older than ${CONVERSATION_RETENTION_DAYS} days…"
+cleanup_conversation_archives || true
 
 # NanoClaw reads `.env` from each agent directory (cwd). Seed from repo-root templates if missing.
 sync_agent_env() {

@@ -43,6 +43,19 @@ Orchestration logs live under `logs/*.log`.
 ./start.sh        # also trims after killing stale processes, then starts agents
 ```
 
+## Conversation archive cleanup
+
+Conversation archives live under `andy/groups/*/conversations/*.md` and `bob/groups/*/conversations/*.md`.
+
+The repo-root `start.sh` will delete archive `.md` files older than **5 days** (by file mtime):
+- once on `./start.sh stop`
+- once on startup after stale-kill
+- and then daily inside the background trimmer loop
+
+Configure with:
+- `CONVERSATION_RETENTION_DAYS` (default `5`)
+- `CONVERSATION_CLEAN_INTERVAL_SECONDS` (default `86400`)
+
 ## After code changes — run these automatically
 
 Run from the **repository root** (`nano-claw-agents`). Ensure meaningful changes are **committed on `main`** before splitting (subtree split uses commit history, not unstaged files).
