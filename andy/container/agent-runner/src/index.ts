@@ -73,19 +73,44 @@ interface OpenRouterResponse {
 
 const REQUESTED_MODEL = process.env.NANOCLAW_MODEL;
 const OPENROUTER_API_KEY = process.env.ANTHROPIC_AUTH_TOKEN;
+
+function getOpenRouterFetchTimeoutMs(): number {
+  const raw = process.env.NANOCLAW_OPENROUTER_TIMEOUT_MS?.trim();
+  if (!raw) return 300_000; // 5m — verifier prompts can be large; override if needed
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return 300_000;
+  return Math.max(30_000, Math.min(900_000, n));
+}
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
 const SCRIPT_TIMEOUT_MS = 30_000;
 const TOOL_TIMEOUT_MS = 30_000;
-/** Max (model reply → execute parsed tools) cycles before forcing a plain-language wrap-up. */
-const MAX_TOOL_ROUNDS = 10;
 /** Keep at most this many non-system messages in the session to stay within context limits. */
 const MAX_SESSION_MESSAGES = 30;
 /** Hard cap on any single message's content stored in the session (chars). */
 const MAX_MESSAGE_CHARS = 4_000;
 const MAX_TOOL_COMMANDS_PER_TURN = 4;
 const GROUP_DIR = '/workspace/group';
+/** Append-only audit of executed tool batches (host: groups/<folder>/logs/tool-use.jsonl). */
+const TOOL_USE_LOG_PATH = path.join(GROUP_DIR, 'logs', 'tool-use.jsonl');
+/** Append-only audit of tool executions (host: groups/<folder>/logs/tool-use-detailed.jsonl). */
+const TOOL_USE_DETAILED_LOG_PATH = path.join(
+  GROUP_DIR,
+  'logs',
+  'tool-use-detailed.jsonl',
+);
+
+function resolveMaxToolRounds(): number {
+  const raw = process.env.NANOCLAW_MAX_TOOL_ROUNDS?.trim();
+  if (!raw) return 20;
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n)) return 20;
+  return Math.max(1, Math.min(40, n));
+}
+
+/** Max (model reply → execute parsed tools) cycles before forcing a plain-language wrap-up. */
+const MAX_TOOL_ROUNDS = resolveMaxToolRounds();
 const GLOBAL_DIR = '/workspace/global';
 const PROJECT_DIR = '/workspace/project';
 const COMMON_DIR = '/workspace/common';
@@ -299,6 +324,49 @@ function resolveOpenRouterApiUrl(): string {
 
 function ensureDir(dirPath: string): void {
   fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function appendToolUseLogLine(entry: Record<string, unknown>): void {
+  try {
+    ensureDir(path.dirname(TOOL_USE_LOG_PATH));
+    fs.appendFileSync(TOOL_USE_LOG_PATH, `${JSON.stringify(entry)}\n`);
+  } catch (err) {
+    log(
+      `Failed to append tool-use log: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+function capToolOutputForLog(raw: string, max = 12_000): string {
+  const t = raw.trim();
+  if (t.length <= max) return t;
+  return `${t.slice(0, max)}\n…(truncated, ${t.length} chars total)`;
+}
+
+function parseToolStatusHeuristic(output: string): 'success' | 'error' | 'unknown' {
+  const t = output.trim();
+  if (!t) return 'unknown';
+  try {
+    const parsed = JSON.parse(t) as { status?: unknown };
+    const status = parsed?.status;
+    if (status === 'success' || status === 'already_completed') return 'success';
+    if (status === 'error') return 'error';
+  } catch {
+    // ignore
+  }
+  if (/\b(error|failed|fatal)\b/i.test(t)) return 'error';
+  return 'unknown';
+}
+
+function appendToolUseDetailedLogLine(entry: Record<string, unknown>): void {
+  try {
+    ensureDir(path.dirname(TOOL_USE_DETAILED_LOG_PATH));
+    fs.appendFileSync(TOOL_USE_DETAILED_LOG_PATH, `${JSON.stringify(entry)}\n`);
+  } catch (err) {
+    log(
+      `Failed to append tool-use-detailed log: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 function sessionPath(sessionId: string): string {
@@ -924,6 +992,12 @@ async function queryOpenRouter(
 
   pruneSessionMessages(session);
 
+  const timeoutMs = getOpenRouterFetchTimeoutMs();
+  const signal =
+    typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
+      ? AbortSignal.timeout(timeoutMs)
+      : undefined;
+
   const response = await fetch(resolveOpenRouterApiUrl(), {
     method: 'POST',
     headers: {
@@ -937,6 +1011,7 @@ async function queryOpenRouter(
       messages: session.messages,
       temperature: 0.2,
     }),
+    signal,
   });
 
   const text = await response.text();
@@ -1709,8 +1784,22 @@ async function runWorkspaceCommand(command: string, args: string[]): Promise<str
       return `Touched ${filePath}`;
     }
     if (command === 'workspace-list') {
-      const dir = resolveWorkspacePath(args[0] || '.', COMMON_DIR);
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      const rawArg = args[0] || '.';
+      const resolved = resolveWorkspacePath(rawArg, COMMON_DIR);
+      if (!fs.existsSync(resolved)) {
+        return `Path not found: ${rawArg}`;
+      }
+      const st = fs.statSync(resolved);
+      if (st.isFile()) {
+        return (
+          `file ${path.basename(resolved)} (${st.size} bytes)\n` +
+          `(workspace-list lists directories; use workspace-read \`${rawArg}\` to confirm this file, or workspace-list /workspace/common for the shared folder.)`
+        );
+      }
+      if (!st.isDirectory()) {
+        return `Not a listable directory: ${rawArg}`;
+      }
+      const entries = fs.readdirSync(resolved, { withFileTypes: true });
       return entries
         .map((entry) => `${entry.isDirectory() ? 'dir ' : 'file'} ${entry.name}`)
         .join('\n') || 'Workspace directory is empty.';
@@ -2110,13 +2199,32 @@ interface ToolRunResult {
   gitSnapshotsCollected: string[];
 }
 
-async function runToolCommands(commands: string[]): Promise<ToolRunResult> {
+async function runToolCommands(
+  commands: string[],
+  ctx: {
+    at: string;
+    sessionId: string;
+    chatJid: string;
+    assistantName: string | null;
+    groupFolder: string;
+    toolRound: number;
+  },
+): Promise<ToolRunResult> {
   const results: string[] = [];
   const gitSnapshotsCollected: string[] = [];
   for (const command of commands) {
     log(`Running tool command: ${command}`);
+    const started = Date.now();
     const output = await runToolCommand(command);
+    const durationMs = Date.now() - started;
     results.push(`$ ${command}\n${output}`);
+    appendToolUseDetailedLogLine({
+      ...ctx,
+      command,
+      durationMs,
+      status: parseToolStatusHeuristic(output),
+      output: capToolOutputForLog(output),
+    });
     const snapshotMatch = output.match(
       /\[Git outcome snapshot[^\]]*\][\s\S]*?ahead_behind_vs_upstream:\n[^\n]*/,
     );
@@ -2253,8 +2361,24 @@ async function runTurn(
     }
 
     session.messages.push({ role: 'assistant', content: capContent(reply) });
-    const toolRun = await runToolCommands(commands);
     toolRounds += 1;
+    const toolRun = await runToolCommands(commands, {
+      at: new Date().toISOString(),
+      sessionId: session.id,
+      chatJid: containerInput.chatJid,
+      assistantName: containerInput.assistantName ?? null,
+      groupFolder: containerInput.groupFolder,
+      toolRound: toolRounds,
+    });
+    appendToolUseLogLine({
+      at: new Date().toISOString(),
+      sessionId: session.id,
+      chatJid: containerInput.chatJid,
+      assistantName: containerInput.assistantName ?? null,
+      round: toolRounds,
+      commands,
+      resultChars: toolRun.text.length,
+    });
     if (shouldEmitToolProgressLine(toolRounds, commands)) {
       emitProgress(session.id, progressToolsLine(containerInput, toolRounds, commands));
     }
