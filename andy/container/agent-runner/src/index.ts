@@ -1398,9 +1398,48 @@ function isToolCommand(command: string): boolean {
 function extractToolCommands(reply: string): string[] {
   const commands: string[] = [];
   const seen = new Set<string>();
+  const looksConcatenated = (command: string): boolean => {
+    const m = command.match(
+      /\b(agent-browser|web-search|websearch|git|github|touch|workspace-(?:list|read|write|delete|rename|mkdir|copy|download|git-clone|git-status))\b/gi,
+    );
+    return (m?.length || 0) > 1;
+  };
+  const hasUnsafeShellSyntax = (command: string): boolean => {
+    // Workspace tools are not a shell; drop anything that looks like heredocs/subshells/pipes/redirections.
+    return /(\$\(|<<|`|\|\||&&|;|\||\n|2>\&1|>\s*\S)/.test(command);
+  };
+  const isPlaceholderToken = (s: string): boolean => {
+    const t = (s || '').trim();
+    if (!t) return true;
+    if (t === '...' || t.includes('<URL_FROM_') || /<[^>]+>/.test(t)) return true;
+    return false;
+  };
+  const isSafeWorkspaceCommand = (
+    executable: string,
+    args: string[],
+    raw: string,
+  ): boolean => {
+    if (!executable.startsWith('workspace-') && executable !== 'touch') return true;
+    if (looksConcatenated(raw)) return false;
+    if (hasUnsafeShellSyntax(raw)) return false;
+    if (executable === 'workspace-download') {
+      const url = args[0] || '';
+      const dest = args[1] || '';
+      if (isPlaceholderToken(url) || isPlaceholderToken(dest)) return false;
+      // Basic sanity: avoid accidental non-URL placeholders
+      if (!/^https?:\/\//i.test(url)) return false;
+    }
+    if (executable === 'workspace-write') {
+      // Prevent the exact failure mode seen in logs: `workspace-write ... "$(node - <<'JS'`
+      const content = args.slice(1).join(' ');
+      if (/(\$\(|<<|`)/.test(content)) return false;
+    }
+    return true;
+  };
   const isRunnable = (command: string): boolean => {
     const [executable, ...args] = shellSplit(command);
     if (!executable) return false;
+    if (!isSafeWorkspaceCommand(executable, args, command)) return false;
     if (executable === 'workspace-write' || executable === 'workspace-copy' || executable === 'workspace-download') {
       return args.length >= 2 && args.slice(1).join(' ').trim() !== '...';
     }
@@ -2209,10 +2248,28 @@ async function runToolCommands(
     groupFolder: string;
     toolRound: number;
   },
+  state: { perCommandCount: Map<string, number>; maxRepeats: number },
 ): Promise<ToolRunResult> {
   const results: string[] = [];
   const gitSnapshotsCollected: string[] = [];
   for (const command of commands) {
+    const key = command.trim();
+    const prev = state.perCommandCount.get(key) || 0;
+    if (prev >= state.maxRepeats) {
+      results.push(
+        `$ ${command}\nSkipped: repeated the same tool command ${prev} time(s) already this turn. ` +
+          `Stop looping and summarize progress / next action instead.`,
+      );
+      appendToolUseDetailedLogLine({
+        ...ctx,
+        command,
+        durationMs: 0,
+        status: 'unknown',
+        output: `Skipped (repeat-limit): previously executed ${prev} time(s) this turn.`,
+      });
+      continue;
+    }
+    state.perCommandCount.set(key, prev + 1);
     log(`Running tool command: ${command}`);
     const started = Date.now();
     const output = await runToolCommand(command);
@@ -2352,6 +2409,7 @@ async function runTurn(
   let reply = await queryOpenRouter(session, containerInput);
   let toolRounds = 0;
   let lastGitSnapshots: string[] = [];
+  const toolState = { perCommandCount: new Map<string, number>(), maxRepeats: 2 };
 
   while (true) {
     const commands = extractToolCommands(reply);
@@ -2369,7 +2427,7 @@ async function runTurn(
       assistantName: containerInput.assistantName ?? null,
       groupFolder: containerInput.groupFolder,
       toolRound: toolRounds,
-    });
+    }, toolState);
     appendToolUseLogLine({
       at: new Date().toISOString(),
       sessionId: session.id,
