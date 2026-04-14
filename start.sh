@@ -13,6 +13,8 @@ LOG_MAX_BYTES="${LOG_MAX_BYTES:-50000}"
 LOG_TRIM_INTERVAL_SECONDS="${LOG_TRIM_INTERVAL_SECONDS:-30}"
 CONVERSATION_RETENTION_DAYS="${CONVERSATION_RETENTION_DAYS:-5}"
 CONVERSATION_CLEAN_INTERVAL_SECONDS="${CONVERSATION_CLEAN_INTERVAL_SECONDS:-86400}"
+MULTI_DASHBOARD_HOST="${NANOCLAW_MULTI_DASHBOARD_HOST:-127.0.0.1}"
+MULTI_DASHBOARD_PORT="${NANOCLAW_MULTI_DASHBOARD_PORT:-4790}"
 
 trim_orchestration_logs_to_cap() {
   shopt -s nullglob
@@ -262,23 +264,29 @@ echo "Starting bot-bridge..."
 launch_background "$LOG_DIR/bridge.log" bash "$SCRIPT_DIR/bot-bridge.sh"
 BRIDGE_PID=$!
 
+echo "Starting multi-agent dashboard..."
+launch_background "$LOG_DIR/dashboard.log" node "$SCRIPT_DIR/dashboard/multi-dashboard.js"
+DASHBOARD_PID=$!
+
 echo "Starting log trimmer..."
 launch_background "$LOG_DIR/log-trimmer.log" bash "$SCRIPT_DIR/start.sh" log-trimmer-loop
 TRIMMER_PID=$!
 
 # Save PIDs
-printf '%s\n' "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" "$TRIMMER_PID" > "$PID_FILE"
+printf '%s\n' "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" "$DASHBOARD_PID" "$TRIMMER_PID" > "$PID_FILE"
 
 # Disown so agents keep running after this script exits
-disown "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" "$TRIMMER_PID"
+disown "$ANDY_PID" "$BOB_PID" "$BRIDGE_PID" "$DASHBOARD_PID" "$TRIMMER_PID"
 
 echo ""
 echo "Agents running in background."
 echo "  Andy PID : $ANDY_PID"
 echo "  Bob PID  : $BOB_PID"
 echo "  Bridge   : $BRIDGE_PID"
+echo "  Dashboard: $DASHBOARD_PID"
 echo "  Trimmer  : $TRIMMER_PID"
 echo ""
 echo "Logs : $LOG_DIR/andy.log | $LOG_DIR/bob.log | $LOG_DIR/bridge.log"
+echo "UI   : http://${MULTI_DASHBOARD_HOST}:${MULTI_DASHBOARD_PORT}"
 echo "Stop : ./start.sh stop  (logs are capped at ${LOG_MAX_BYTES} bytes automatically)"
 echo "Full clear: ./start.sh logs-clean"
